@@ -1,4 +1,13 @@
+/*
+    TODO: 
+    * Validate/Sanitize Input
+    * Response Codes
+    * Correctly Formatted GeoJSON
+    * Abstract DB connection for configuration via some sort of file
+    * Caching via Redis
 
+
+*/
 package main
 
 import (
@@ -19,33 +28,38 @@ func main() {
     // Every request needs to know Indicator, Time, Geography
     // Optionally we can return the geography
     m:= martini.Classic()
-    m.Get("/api/", func(res http.ResponseWriter, req *http.Request, params martini.Params) string{
+    m.Get("/indicator/:slug", func(res http.ResponseWriter, req *http.Request, params martini.Params) string{
         res.Header().Set("Content-Type", "application/json")
-        ind := req.FormValue("ind")
+        ind := params["slug"]
         time := req.FormValue("time")
         raw_geos := req.FormValue("geos")
         getGeom := req.FormValue("geom") // should we get the geos?
-        //fmt.Println(getGeom)
+        fmt.Println(getGeom)
         var r []byte
         if (getGeom == ""){
-            r = getData(ind, time, raw_geos)
+            r = getData(ind, time, raw_geos, false)
+            return string(r[:])
         }else{
             // include geoms
+            r = getData(ind, time, raw_geos, true)
+            return string(r[:])
         }
 
-        return string(r[:])
     })
 
     m.Run()
 }
 
-func getData(ind string, time string, raw_geos string) []byte {
-    // profiles_flatvalue is our table
-
+func getData(ind string, time string, raw_geos string, get_geoms bool) []byte {
+    // TODO: Caching
     var (
-        indicator_id int
+        //indicator_id int
+        indicator_slug string
         display_title string
         geography_id int
+        geography_name string
+        //geography_slug string
+        geometry_id sql.NullInt64
         value_type string
         time_key string
         number sql.NullFloat64
@@ -56,17 +70,18 @@ func getData(ind string, time string, raw_geos string) []byte {
         f_moe sql.NullString
     )
     //geos := strings.Split(raw_geos, ",") // Do commas make sense?
-    db, err := sql.Open("postgres", "user=asmedrano dbname=cp_from_dev") // TODO:Abstract getting db
+    db, err := sql.Open("postgres", "user=asmedrano dbname=cp_pitts_dev") // TODO:Abstract getting db
 	if err != nil {
 		log.Fatal(err)
 	}
     defer db.Close()
     var query string
+    //TODO: NEED TO SANITIZE INPUT
     if raw_geos == "*"{
-        query = "SELECT indicator_id, display_title, geography_id, value_type, time_key, number, percent, moe, f_number, f_percent, f_moe FROM profiles_flatvalue WHERE display_title = $1 AND time_key= $2"
+        query = "SELECT indicator_slug, display_title, geography_id, geography_name, geometry_id, value_type, time_key, number, percent, moe, f_number, f_percent, f_moe FROM profiles_flatvalue WHERE indicator_slug = $1 AND time_key= $2"
 
     }else{
-        query = "SELECT indicator_id, display_title, geography_id, value_type, time_key, number, percent, moe, f_number, f_percent, f_moe FROM profiles_flatvalue WHERE display_title = $1 AND time_key= $2 AND geography_id IN (" +raw_geos + ")"
+        query = "SELECT indicator_slug, display_title, geography_id,geography_name, geometry_id, value_type, time_key, number, percent, moe, f_number, f_percent, f_moe FROM profiles_flatvalue WHERE indicator_slug = $1 AND time_key= $2 AND geography_id IN (" +raw_geos + ")"
     }
 
     stmt, err := db.Prepare(query)
@@ -82,13 +97,24 @@ func getData(ind string, time string, raw_geos string) []byte {
     results := []interface{}{}
     for rows.Next() {
         jrow := make(map[string]interface{})
-        err := rows.Scan(&indicator_id, &display_title, &geography_id, &value_type, &time_key, &number, &percent, &moe, &f_number, &f_percent, &f_moe)
+        err := rows.Scan(&indicator_slug, &display_title, &geography_id, &geography_name, &geometry_id, &value_type, &time_key, &number, &percent, &moe, &f_number, &f_percent, &f_moe)
         if err != nil {
             log.Fatal(err)
         }
-        jrow["indicator_id"] = indicator_id
+        if get_geoms == true{
+            // Using a Channel here is totally pointless. Why not just a join? Anyway. Just practicing i guess.
+            c := make(chan map[string]interface{})
+            if geometry_id.Valid {
+                go getGeomById(c, geometry_id.Int64)
+                jrow["geom"] = <-c
+            }else{
+                jrow["geom"] = nil
+            }
+        }
+        jrow["indicator_slug"] = indicator_slug
         jrow["display_title"] = display_title
         jrow["geography_id"] = geography_id
+        jrow["geography_name"] = geography_name
         jrow["value_type"] = value_type
         jrow["time_key"] = time_key
         if number.Valid{
@@ -136,27 +162,26 @@ func getData(ind string, time string, raw_geos string) []byte {
 }
 
 
-func getGeom() {
-    var id int
+func getGeomById(c chan map[string]interface{}, id int64) {
+    // TODO: Caching!
     var geom string
-    db, err := sql.Open("postgres", "user=asmedrano dbname=cp_from_dev")
+    db, err := sql.Open("postgres", "user=asmedrano dbname=cp_pitts_dev")
 	if err != nil {
 		log.Fatal(err)
 	}
     defer db.Close()
 
-    rows, err := db.Query("SELECT id, ST_AsGeoJSON(geom) FROM maps_polygonmapfeature LIMIT 1")
+    rows, err := db.Query("SELECT ST_AsGeoJSON(geom) FROM maps_polygonmapfeature WHERE id= $1 LIMIT 1", id)
     if err != nil {
         log.Fatal(err)
     }
     defer rows.Close()
 
     for rows.Next() {
-        err := rows.Scan(&id, &geom)
+        err := rows.Scan(&geom)
         if err != nil {
             log.Fatal(err)
         }
-        log.Println(id, geom)
     }
 
     err = rows.Err()
@@ -164,7 +189,20 @@ func getGeom() {
     if err != nil {
         log.Fatal(err)
     }
+    c <- jsonLoads(geom)
 }
+
+func jsonLoads(j string) map[string]interface{} {
+    sB := []byte(j)
+    var f interface{}
+    // At this point the Go value in f would be a map whose keys are strings and whose values are themselves stored as empty interface values:
+    // If the json is formated wrong, f will be nil :TODO catch that error
+    json.Unmarshal(sB, &f)
+    // To access this data we can use a type assertion to access `f`'s underlying map[string]interface{}:
+    m := f.(map[string]interface{})
+    return m
+}
+
 
 func csToIs(cs string) []int {
     st := strings.Split(cs, ",")
@@ -177,7 +215,6 @@ func csToIs(cs string) []int {
     }
     return out
 }
-
 
 func print(args ...interface{}) {
     fmt.Println(args...)
