@@ -1,11 +1,11 @@
 /*
-    TODO: 
-    * Validate/Sanitize Input
-    * Response Codes
-    * Correctly Formatted GeoJSON
+    TODO:
+    * Float64 in JSON are in Scientific Notation which is fine by JSON spec
+    * Correctly Formatted GeoJSON <-- DONE
     * Abstract DB connection for configuration via some sort of file
     * Caching via Redis
-
+    * Indicator Details in response?
+    * Need to make response smaller, possible pull out indicator details from each object
 
 */
 package main
@@ -20,6 +20,9 @@ import (
     "net/http"
     "strconv"
     "encoding/json"
+    "regexp"
+    "errors"
+    //"reflect"
 
 )
 
@@ -28,21 +31,32 @@ func main() {
     // Every request needs to know Indicator, Time, Geography
     // Optionally we can return the geography
     m:= martini.Classic()
-    m.Get("/indicator/:slug", func(res http.ResponseWriter, req *http.Request, params martini.Params) string{
+    m.Get("/indicator/:slug", func(res http.ResponseWriter, req *http.Request, params martini.Params) (int, string) {
         res.Header().Set("Content-Type", "application/json")
         ind := params["slug"]
         time := req.FormValue("time")
         raw_geos := req.FormValue("geos")
         getGeom := req.FormValue("geom") // should we get the geos?
-        fmt.Println(getGeom)
         var r []byte
         if (getGeom == ""){
             r = getData(ind, time, raw_geos, false)
-            return string(r[:])
+            r := string(r[:])
+            if r != "405" {
+                return 200, r
+            }else{
+                return 405, "time and geos is Required"
+            }
         }else{
             // include geoms
             r = getData(ind, time, raw_geos, true)
-            return string(r[:])
+            r := string(r[:])
+
+            if r != "405" {
+                return 200, r
+            }else{
+                return 405, "time and geos is Required"
+            }
+
         }
 
     })
@@ -69,19 +83,38 @@ func getData(ind string, time string, raw_geos string, get_geoms bool) []byte {
         f_percent sql.NullString
         f_moe sql.NullString
     )
+
+    /* SANITIZING INPUTS */
+    cleaned_geos, err := sanitize(raw_geos, "[0-9,\\*]+")
+    if err != nil{
+        r:=[]byte("405")
+        return r
+    }
+
+    cleaned_time, err := sanitize(time, "[0-9,\\*]+")
+    if err != nil{
+        r:=[]byte("405")
+        return r
+
+    }
+    
+    data := map[string]interface{}{} // this will be the object that wraps everything
+
     //geos := strings.Split(raw_geos, ",") // Do commas make sense?
     db, err := sql.Open("postgres", "user=asmedrano dbname=cp_pitts_dev") // TODO:Abstract getting db
 	if err != nil {
 		log.Fatal(err)
 	}
     defer db.Close()
+
     var query string
-    //TODO: NEED TO SANITIZE INPUT
-    if raw_geos == "*"{
+
+
+    if cleaned_geos == "*"{
         query = "SELECT indicator_slug, display_title, geography_id, geography_name, geometry_id, value_type, time_key, number, percent, moe, f_number, f_percent, f_moe FROM profiles_flatvalue WHERE indicator_slug = $1 AND time_key= $2"
 
     }else{
-        query = "SELECT indicator_slug, display_title, geography_id,geography_name, geometry_id, value_type, time_key, number, percent, moe, f_number, f_percent, f_moe FROM profiles_flatvalue WHERE indicator_slug = $1 AND time_key= $2 AND geography_id IN (" +raw_geos + ")"
+        query = "SELECT indicator_slug, display_title, geography_id, geography_name, geometry_id, value_type, time_key, number, percent, moe, f_number, f_percent, f_moe FROM profiles_flatvalue WHERE indicator_slug = $1 AND time_key= $2 AND geography_id IN (" +cleaned_geos + ")"
     }
 
     stmt, err := db.Prepare(query)
@@ -90,7 +123,7 @@ func getData(ind string, time string, raw_geos string, get_geoms bool) []byte {
     }
     defer stmt.Close()
 
-    rows, err := stmt.Query(ind, time)
+    rows, err := stmt.Query(ind, cleaned_time)
     if err != nil {
         log.Fatal(err)
     }
@@ -102,7 +135,7 @@ func getData(ind string, time string, raw_geos string, get_geoms bool) []byte {
             log.Fatal(err)
         }
         if get_geoms == true{
-            // Using a Channel here is totally pointless. Why not just a join? Anyway. Just practicing i guess.
+            // Using a Channel here is totally pointless. Why not just a join? Anyway. Just practicing I guess.
             c := make(chan map[string]interface{})
             if geometry_id.Valid {
                 go getGeomById(c, geometry_id.Int64)
@@ -122,8 +155,12 @@ func getData(ind string, time string, raw_geos string, get_geoms bool) []byte {
         }else{
             jrow["number"] = nil
         }
-        if percent.Valid{
-            jrow["percent"] = percent.Float64
+        if value_type != "i"{
+            if percent.Valid{
+                jrow["percent"] = percent.Float64
+            }else{
+                jrow["percent"] = nil
+            }
         }else{
             jrow["percent"] = nil
         }
@@ -139,10 +176,13 @@ func getData(ind string, time string, raw_geos string, get_geoms bool) []byte {
         }else{
             jrow["f_number"] = nil
         }
+        if value_type != "i"{
+            if f_percent.Valid{
+                jrow["f_percent"] = f_percent.String
 
-        if f_percent.Valid{
-            jrow["f_percent"] = f_percent.String
-
+            }else{
+                jrow["f_percent"] = nil
+            }
         }else{
             jrow["f_percent"] = nil
         }
@@ -154,10 +194,25 @@ func getData(ind string, time string, raw_geos string, get_geoms bool) []byte {
             jrow["f_moe"] = nil
         }
 
+        if get_geoms==true {
+            // patch the geojson now if its available 
+            if jrow["geom"] != nil{
+                jrow["geom"].(map[string]interface{})["properties"].(map[string]interface{})["label"] = geography_name
+                v:= map[string]interface{}{}
+                v["number"] = jrow["number"]
+                v["f_number"] = jrow["f_number"]
+                v["percent"] = jrow["percent"]
+                v["f_percent"] = jrow["f_percent"]
+                v["moe"] = jrow["moe"]
+                v["f_moe"] = jrow["f_moe"]
+                jrow["geom"].(map[string]interface{})["properties"].(map[string]interface{})["values"] = &v
+            }
+        }
+
         results = append(results, jrow)
     }
-
-    j, err := json.Marshal(results)
+    data["objects"] = &results
+    j, err := json.Marshal(data)
     return j
 }
 
@@ -189,7 +244,41 @@ func getGeomById(c chan map[string]interface{}, id int64) {
     if err != nil {
         log.Fatal(err)
     }
-    c <- jsonLoads(geom)
+    geoObj := jsonLoads(geom)
+    props := map[string]interface{}{}
+    geoObj["properties"] = props
+    c <- geoObj
+}
+
+
+/* UTILS */
+
+func sanitize(input string, allowed string) (res string, err error) {
+    /*
+        input: the string to check
+        allowed: a regex string
+
+        Returns error if match fails
+        nil otherwise
+    */
+    matched, err := regexp.MatchString(allowed, input)
+    if err != nil {
+        return "", errors.New("405")
+    }
+    
+    if matched == false {
+        return "", errors.New("405")        
+    }
+    // since we know we have a match, lets pull the string out
+    re := regexp.MustCompile(allowed)
+    output := re.FindString(input)
+    // Trim things that will break things
+    output = strings.TrimPrefix(output, ",")
+	output = strings.TrimSuffix(output, ",")
+    output = strings.TrimPrefix(output, "-")
+	output = strings.TrimSuffix(output, "-")
+
+    return output, nil
 }
 
 func jsonLoads(j string) map[string]interface{} {
