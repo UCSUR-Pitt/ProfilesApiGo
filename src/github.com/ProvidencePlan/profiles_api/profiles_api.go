@@ -1,17 +1,16 @@
 /*
     TODO:
-    * Float64 in JSON are in Scientific Notation which is fine by JSON spec
-    * Correctly Formatted GeoJSON <-- DONE
-    * Abstract DB connection for configuration via some sort of file
+    * Float64 in JSON are in Scientific Notation which is fine by JSON spec[x]
+    * Get Geometry alone by ID
     * Caching via Redis
-    * Indicator Details in response?
-    * Need to make response smaller, possible pull out indicator details from each object
-
+    * Do we need to dish out Requests to Go Routines?
+    * Document What you have learned
 */
 package main
 
 import (
     "fmt"
+    "os"
     "strings"
     "log"
     "github.com/codegangsta/martini"
@@ -22,49 +21,20 @@ import (
     "encoding/json"
     "regexp"
     "errors"
+    "io/ioutil"
     //"reflect"
 
 )
 
-func main() {
-    // ex: http://profiles.provplan.org/maps_api/v1/geo/set/12817/?&name=Total%20Population&time=2010&format=json&limit=0
-    // Every request needs to know Indicator, Time, Geography
-    // Optionally we can return the geography
-    m:= martini.Classic()
-    m.Get("/indicator/:slug", func(res http.ResponseWriter, req *http.Request, params martini.Params) (int, string) {
-        res.Header().Set("Content-Type", "application/json")
-        ind := params["slug"]
-        time := req.FormValue("time")
-        raw_geos := req.FormValue("geos")
-        getGeom := req.FormValue("geom") // should we get the geos?
-        var r []byte
-        if (getGeom == ""){
-            r = getData(ind, time, raw_geos, false)
-            r := string(r[:])
-            if r != "405" {
-                return 200, r
-            }else{
-                return 405, "time and geos is Required"
-            }
-        }else{
-            // include geoms
-            r = getData(ind, time, raw_geos, true)
-            r := string(r[:])
-
-            if r != "405" {
-                return 200, r
-            }else{
-                return 405, "time and geos is Required"
-            }
-
-        }
-
-    })
-
-    m.Run()
+type CONFIG struct {
+        DB_HOST string
+        DB_PORT string
+        DB_NAME string
+        DB_USER string
+        DB_PASS string
 }
 
-func getData(ind string, time string, raw_geos string, get_geoms bool) []byte {
+func getData(ind string, time string, raw_geos string, conf CONFIG) []byte {
     // TODO: Caching
     var (
         //indicator_id int
@@ -101,20 +71,23 @@ func getData(ind string, time string, raw_geos string, get_geoms bool) []byte {
     data := map[string]interface{}{} // this will be the object that wraps everything
 
     //geos := strings.Split(raw_geos, ",") // Do commas make sense?
-    db, err := sql.Open("postgres", "user=asmedrano dbname=cp_pitts_dev") // TODO:Abstract getting db
+    //db, err := sql.Open("postgres", "user=asmedrano dbname=cp_pitts_dev") // TODO:Abstract getting db
+    db, err := getDB(conf)
 	if err != nil {
-		log.Fatal(err)
+		log.Println("Error trying to call getDB")
+        r:=[]byte("500")
+        return r
 	}
     defer db.Close()
 
+    var base_query string = "SELECT indicator_slug, display_title, geography_id, geography_name, geometry_id, value_type, time_key, number, percent, moe, f_number, f_percent, f_moe FROM profiles_flatvalue WHERE indicator_slug = $1 AND time_key= $2"
     var query string
 
-
+    // we need to support getting * geos or specific ones via thier ids
     if cleaned_geos == "*"{
-        query = "SELECT indicator_slug, display_title, geography_id, geography_name, geometry_id, value_type, time_key, number, percent, moe, f_number, f_percent, f_moe FROM profiles_flatvalue WHERE indicator_slug = $1 AND time_key= $2"
-
+        query = base_query
     }else{
-        query = "SELECT indicator_slug, display_title, geography_id, geography_name, geometry_id, value_type, time_key, number, percent, moe, f_number, f_percent, f_moe FROM profiles_flatvalue WHERE indicator_slug = $1 AND time_key= $2 AND geography_id IN (" +cleaned_geos + ")"
+        query = base_query + "AND geography_id IN (" +cleaned_geos + ")"
     }
 
     stmt, err := db.Prepare(query)
@@ -133,16 +106,6 @@ func getData(ind string, time string, raw_geos string, get_geoms bool) []byte {
         err := rows.Scan(&indicator_slug, &display_title, &geography_id, &geography_name, &geometry_id, &value_type, &time_key, &number, &percent, &moe, &f_number, &f_percent, &f_moe)
         if err != nil {
             log.Fatal(err)
-        }
-        if get_geoms == true{
-            // Using a Channel here is totally pointless. Why not just a join? Anyway. Just practicing I guess.
-            c := make(chan map[string]interface{})
-            if geometry_id.Valid {
-                go getGeomById(c, geometry_id.Int64)
-                jrow["geom"] = <-c
-            }else{
-                jrow["geom"] = nil
-            }
         }
         jrow["indicator_slug"] = indicator_slug
         jrow["display_title"] = display_title
@@ -194,21 +157,6 @@ func getData(ind string, time string, raw_geos string, get_geoms bool) []byte {
             jrow["f_moe"] = nil
         }
 
-        if get_geoms==true {
-            // patch the geojson now if its available 
-            if jrow["geom"] != nil{
-                jrow["geom"].(map[string]interface{})["properties"].(map[string]interface{})["label"] = geography_name
-                v:= map[string]interface{}{}
-                v["number"] = jrow["number"]
-                v["f_number"] = jrow["f_number"]
-                v["percent"] = jrow["percent"]
-                v["f_percent"] = jrow["f_percent"]
-                v["moe"] = jrow["moe"]
-                v["f_moe"] = jrow["f_moe"]
-                jrow["geom"].(map[string]interface{})["properties"].(map[string]interface{})["values"] = &v
-            }
-        }
-
         results = append(results, jrow)
     }
     data["objects"] = &results
@@ -216,13 +164,155 @@ func getData(ind string, time string, raw_geos string, get_geoms bool) []byte {
     return j
 }
 
+func getDataGeoJson(ind string, time string, raw_geos string, conf CONFIG) []byte {
+    // The GeoJSON version of this
+    // TODO: Caching
+    var (
+        //indicator_id int
+        indicator_slug string
+        display_title string
+        geography_id int
+        geography_name string
+        //geography_slug string
+        geometry_id sql.NullInt64
+        value_type string
+        time_key string
+        number sql.NullFloat64
+        percent sql.NullFloat64
+        moe sql.NullFloat64
+        f_number sql.NullString
+        f_percent sql.NullString
+        f_moe sql.NullString
+        geom sql.NullString
+    )
 
-func getGeomById(c chan map[string]interface{}, id int64) {
+    /* SANITIZING INPUTS */
+    cleaned_geos, err := sanitize(raw_geos, "[0-9,\\*]+")
+    if err != nil{
+        r:=[]byte("405")
+        return r
+    }
+
+    cleaned_time, err := sanitize(time, "[0-9,\\*]+")
+    if err != nil{
+        r:=[]byte("405")
+        return r
+
+    }
+    
+    data := map[string]interface{}{} // this will be the object that wraps everything
+
+    db, err := getDB(conf)
+	if err != nil {
+		log.Println("Error trying to call getDB")
+        r:=[]byte("500")
+        return r
+	}
+    defer db.Close()
+    var base_query = "SELECT profiles_flatvalue.indicator_slug, profiles_flatvalue.display_title, profiles_flatvalue.geography_id, profiles_flatvalue.geography_name, profiles_flatvalue.geometry_id, profiles_flatvalue.value_type, profiles_flatvalue.time_key, profiles_flatvalue.number, profiles_flatvalue.percent, profiles_flatvalue.moe, profiles_flatvalue.f_number, profiles_flatvalue.f_percent, profiles_flatvalue.f_moe, ST_AsGeoJSON(maps_polygonmapfeature.geom) AS geom FROM profiles_flatvalue LEFT OUTER JOIN maps_polygonmapfeature ON (maps_polygonmapfeature.id = profiles_flatvalue.geometry_id) WHERE profiles_flatvalue.indicator_slug = $1 AND time_key= $2"
+    var query string 
+
+    // we need to support getting * geos or specific ones via thier ids also we need to be able to join on a geom
+    if cleaned_geos == "*"{
+        query = base_query
+
+    }else{
+        query = base_query + "AND profile_flatvalue.geography_id IN (" +cleaned_geos + ")"
+    }
+
+    stmt, err := db.Prepare(query)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer stmt.Close()
+
+    rows, err := stmt.Query(ind, cleaned_time)
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    results := []interface{}{}
+
+    for rows.Next() {
+        jrow := make(map[string]interface{})
+        err := rows.Scan(&indicator_slug, &display_title, &geography_id, &geography_name, &geometry_id, &value_type, &time_key, &number, &percent, &moe, &f_number, &f_percent, &f_moe, &geom)
+        if err != nil {
+            log.Fatal(err)
+        }
+        if geom.Valid{
+            jrow = jsonLoads(geom.String)
+        }else{
+            jrow["coordinates"] = nil
+        }
+        properties := make(map[string]interface{})
+        properties["label"] = geography_name
+        properties["geography_id"] = geography_id
+        values := make(map[string]interface{})
+        values["indicator_slug"] = indicator_slug
+        values["value_type"] = value_type
+        values["time_key"] = time_key
+        if number.Valid{
+            values["number"] = number.Float64
+        }else{
+            values["number"] = nil
+        }
+        if value_type != "i"{
+            if percent.Valid{
+                values["percent"] = percent.Float64
+            }else{
+                values["percent"] = nil
+            }
+        }else{
+            values["percent"] = nil
+        }
+        if moe.Valid{
+            values["moe"] = moe.Float64
+        }else{
+            values["moe"] = nil
+        }
+
+        if f_number.Valid{
+            values["f_number"] = f_number.String
+
+        }else{
+            values["f_number"] = nil
+        }
+        if value_type != "i"{
+            if f_percent.Valid{
+                values["f_percent"] = f_percent.String
+
+            }else{
+                values["f_percent"] = nil
+            }
+        }else{
+            values["f_percent"] = nil
+        }
+
+        if f_moe.Valid{
+            values["f_moe"] = f_moe.String
+
+        }else{
+            values["f_moe"] = nil
+        }
+
+        jrow["properties"] = &properties
+        jrow["values"] = &values
+
+        results = append(results, jrow)
+    }
+
+    data["objects"] = &results
+    j, err := json.Marshal(data)
+    return j
+}
+
+func getGeomById(c chan map[string]interface{}, id int64, conf CONFIG) {
     // TODO: Caching!
     var geom string
-    db, err := sql.Open("postgres", "user=asmedrano dbname=cp_pitts_dev")
+    db, err := getDB(conf)
 	if err != nil {
-		log.Fatal(err)
+		log.Println("Error trying to call getDB")
+        // TODO: How to do we return out of this channel?
 	}
     defer db.Close()
 
@@ -251,7 +341,7 @@ func getGeomById(c chan map[string]interface{}, id int64) {
 }
 
 
-/* UTILS */
+/* --------------------UTILS -----------------*/
 
 func sanitize(input string, allowed string) (res string, err error) {
     /*
@@ -307,4 +397,74 @@ func csToIs(cs string) []int {
 
 func print(args ...interface{}) {
     fmt.Println(args...)
+}
+
+func getConf(conf_path string) CONFIG {
+    path := conf_path
+    file, err := ioutil.ReadFile(path)
+    if err != nil {
+            log.Fatalf("Could not open file '%s'.", path)
+            os.Exit(1)
+    }
+    conf := CONFIG{}
+    json.Unmarshal(file, &conf)
+    return conf
+}
+
+func getDB(conf CONFIG) (*sql.DB, error)  {
+    conn_str := fmt.Sprintf("user=%s dbname=%s host=%s port=%s password=%s  sslmode=disable",
+    conf.DB_USER, conf.DB_NAME, conf.DB_HOST, conf.DB_PORT, conf.DB_PASS)
+    db, err := sql.Open("postgres", conn_str)
+    err = db.Ping()
+    return db, err
+}
+
+func main() {
+    // ex: http://profiles.provplan.org/maps_api/v1/geo/set/12817/?&name=Total%20Population&time=2010&format=json&limit=0
+    // Every request needs to know Indicator, Time, Geography
+    // Optionally we can return the geography
+    args := os.Args
+    if len(args) < 2 {
+        log.Fatal("Config file and port Required. Ex: profiles_api settings.json :8080")
+        os.Exit(1)
+    }
+    
+    settings_path := args[1]
+    settings_port := args[2]
+    log.Printf("Starting Server on %s", settings_port)
+    conf := getConf(settings_path)
+    m:= martini.Classic()
+    m.Get("/indicator/:slug", func(res http.ResponseWriter, req *http.Request, params martini.Params) (int, string) {
+        res.Header().Set("Content-Type", "application/json")
+        ind := params["slug"]
+        time := req.FormValue("time")
+        raw_geos := req.FormValue("geos")
+        getGeom := req.FormValue("geom") // should we get the geos?
+        var r []byte
+        if (getGeom == ""){
+            r = getData(ind, time, raw_geos, conf)
+            r := string(r[:])
+            if r != "405" {
+                return 200, r
+            }else{
+                return 405, "time and geos is Required"
+            }
+        }else{
+            // include geoms
+            r = getDataGeoJson(ind, time, raw_geos, conf)
+            r := string(r[:])
+            
+            if r == "405" {
+                return 405, "time and geos is Required"
+            } else if r == "500" {
+                return 500, "Server Error"
+            } else {
+                return 200, r 
+            }
+        }
+
+    })
+
+    http.ListenAndServe(settings_port, m)
+    //m.Run()
 }

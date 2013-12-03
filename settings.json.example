@@ -1,0 +1,7 @@
+{
+        "DB_HOST": "localhost",
+        "DB_PORT": "5432",
+        "DB_NAME": "cp_pitts_dev",
+        "DB_USER": "asmedrano",
+        "DB_PASS": ""
+}
