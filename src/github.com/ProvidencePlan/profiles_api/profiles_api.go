@@ -1,9 +1,7 @@
 /*
     TODO:
     * Float64 in JSON are in Scientific Notation which is fine by JSON spec[x]
-    * Get Geometry alone by ID
     * Caching via Redis
-    * Do we need to dish out Requests to Go Routines?
     * Document What you have learned
 */
 package main
@@ -222,7 +220,10 @@ func getDataGeoJson(ind string, time string, raw_geos string, conf CONFIG) []byt
 
     stmt, err := db.Prepare(query)
     if err != nil {
-        log.Fatal(err)
+        log.Println("Error runnning query: getDataGeoJson")
+        r:=[]byte("500")
+        return r
+
     }
     defer stmt.Close()
 
@@ -306,38 +307,57 @@ func getDataGeoJson(ind string, time string, raw_geos string, conf CONFIG) []byt
     return j
 }
 
-func getGeomById(c chan map[string]interface{}, id int64, conf CONFIG) {
+func getGeomsById(geoms_ids string, conf CONFIG) []byte {
     // TODO: Caching!
-    var geom string
+    /*
+        geoms_ids is a comma delimited string
+    */
+    var (
+        geom string
+        geo_key string
+        label string
+    )
+
     db, err := getDB(conf)
 	if err != nil {
 		log.Println("Error trying to call getDB")
-        // TODO: How to do we return out of this channel?
+        r:=[]byte("500")
+        return r
 	}
     defer db.Close()
+    
+    cleaned_geos, err := sanitize(geoms_ids, "[0-9,\\*]+")
 
-    rows, err := db.Query("SELECT ST_AsGeoJSON(geom) FROM maps_polygonmapfeature WHERE id= $1 LIMIT 1", id)
+    if err != nil{
+        r:=[]byte("405")
+        return r
+    }
+
+    rows, err := db.Query("SELECT geo_key, label, ST_AsGeoJSON(geom) FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geos + ")")
+
     if err != nil {
-        log.Fatal(err)
+        log.Println("Error runnning query: getGeomsById")
+        r:=[]byte("500")
+        return r
     }
     defer rows.Close()
-
+    data := map[string]interface{}{} // this will be the object that wraps everything
+    results := []interface{}{}
     for rows.Next() {
-        err := rows.Scan(&geom)
-        if err != nil {
-            log.Fatal(err)
+        err := rows.Scan(&geo_key, &label, &geom)
+        if err == nil {
+            properties := make(map[string]interface{})
+            properties["geo_key"] = &geo_key
+            properties["label"] = &label
+            geom := jsonLoads(geom)
+            geom["properties"] = &properties
+
+            results = append(results, geom)
         }
     }
-
-    err = rows.Err()
-
-    if err != nil {
-        log.Fatal(err)
-    }
-    geoObj := jsonLoads(geom)
-    props := map[string]interface{}{}
-    geoObj["properties"] = props
-    c <- geoObj
+    data["objects"] = &results
+    j, err := json.Marshal(data)
+    return j
 }
 
 
@@ -355,9 +375,9 @@ func sanitize(input string, allowed string) (res string, err error) {
     if err != nil {
         return "", errors.New("405")
     }
-    
+
     if matched == false {
-        return "", errors.New("405")        
+        return "", errors.New("405")
     }
     // since we know we have a match, lets pull the string out
     re := regexp.MustCompile(allowed)
@@ -455,7 +475,7 @@ func main() {
             r := string(r[:])
             
             if r == "405" {
-                return 405, "time and geos is Required"
+                return 405, "time and geos Parameters are Required"
             } else if r == "500" {
                 return 500, "Server Error"
             } else {
@@ -465,6 +485,20 @@ func main() {
 
     })
 
+    m.Get("/shp/", func (res http.ResponseWriter, req *http.Request) (int, string){
+        var r []byte
+        geoms := req.FormValue("geoms")
+        r = getGeomsById(geoms, conf)
+        rs := string(r[:])
+        if rs == "405" {
+            return 405, "geoms Parameter is Required"
+        } else if rs == "500" {
+            return 500, "Server Error"
+        } else {
+            return 200, rs
+        }
+
+    })
+
     http.ListenAndServe(settings_port, m)
-    //m.Run()
 }
