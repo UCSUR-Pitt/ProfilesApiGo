@@ -20,7 +20,7 @@ import (
     "regexp"
     "errors"
     "io/ioutil"
-    //"reflect"
+    "github.com/ProvidencePlan/profiles_api/cache"
 
 )
 
@@ -30,10 +30,42 @@ type CONFIG struct {
         DB_NAME string
         DB_USER string
         DB_PASS string
+        REDIS_CONN string //host and port ex: 127.0.0.1:6379
+        CACHE_EXPIRE int
 }
 
+func getFromCache(connStr string, hash string) ([]byte) {
+    rConn, err := cache.RedisConn(connStr)
+    if err == nil{
+        defer rConn.Close()
+        r , err := cache.GetKey(rConn, hash) // if this is empty, r is a empty byte len(r) == 0
+        if err == nil {
+            return r
+        }
+    }
+
+    var b []byte
+    return b
+}
+
+func putInCache(connStr string, hash string, val []byte, expire int) {
+    rConn, err := cache.RedisConn(connStr)
+    if err == nil {
+        cache.SetKey(rConn, hash, val, expire)
+        defer rConn.Close()
+    }
+
+}
+
+// Indicator Api Handler. Returns values only
 func getData(ind string, time string, raw_geos string, conf CONFIG) []byte {
-    // TODO: Caching
+    hash := cache.MakeHash(ind + time + raw_geos)
+    c := getFromCache(conf.REDIS_CONN, hash)
+    if len(c) != 0{
+        log.Println("Serving getData from cache: ", ind + time + raw_geos)
+        return c
+    }
+
     var (
         //indicator_id int
         indicator_slug string
@@ -90,13 +122,13 @@ func getData(ind string, time string, raw_geos string, conf CONFIG) []byte {
 
     stmt, err := db.Prepare(query)
     if err != nil {
-        log.Fatal(err)
+        log.Println("Error preparing query %s in getData", query)
     }
     defer stmt.Close()
 
     rows, err := stmt.Query(ind, cleaned_time)
     if err != nil {
-        log.Fatal(err)
+        log.Println("Error running query %s in getData", query)
     }
     results := []interface{}{}
     for rows.Next() {
@@ -158,13 +190,22 @@ func getData(ind string, time string, raw_geos string, conf CONFIG) []byte {
         results = append(results, jrow)
     }
     data["objects"] = &results
+
     j, err := json.Marshal(data)
+
+    putInCache(conf.REDIS_CONN, hash, j, conf.CACHE_EXPIRE)
+
     return j
 }
 
 func getDataGeoJson(ind string, time string, raw_geos string, conf CONFIG) []byte {
     // The GeoJSON version of this
-    // TODO: Caching
+    hash := cache.MakeHash("gdgj:" + ind + time + raw_geos)
+    c := getFromCache(conf.REDIS_CONN, hash)
+    if len(c) != 0{
+        log.Println("Serving getData from cache gdgj: ", ind + time + raw_geos)
+        return c
+    }
     var (
         //indicator_id int
         indicator_slug string
@@ -304,14 +345,23 @@ func getDataGeoJson(ind string, time string, raw_geos string, conf CONFIG) []byt
 
     data["objects"] = &results
     j, err := json.Marshal(data)
+
+    putInCache(conf.REDIS_CONN, hash, j, conf.CACHE_EXPIRE)
+
     return j
 }
 
 func getGeomsById(geoms_ids string, conf CONFIG) []byte {
-    // TODO: Caching!
     /*
         geoms_ids is a comma delimited string
     */
+    hash := cache.MakeHash("shp:" + geoms_ids)
+    c := getFromCache(conf.REDIS_CONN, hash)
+    if len(c) != 0{
+        log.Println("Serving getData from shp cache:", geoms_ids)
+        return c
+    }
+
     var (
         geom string
         geo_key string
@@ -357,6 +407,7 @@ func getGeomsById(geoms_ids string, conf CONFIG) []byte {
     }
     data["objects"] = &results
     j, err := json.Marshal(data)
+    putInCache(conf.REDIS_CONN, hash, j, conf.CACHE_EXPIRE)
     return j
 }
 
@@ -448,7 +499,6 @@ func main() {
         log.Fatal("Config file and port Required. Ex: profiles_api settings.json :8080")
         os.Exit(1)
     }
-    
     settings_path := args[1]
     settings_port := args[2]
     log.Printf("Starting Server on %s", settings_port)
