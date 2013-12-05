@@ -1,8 +1,18 @@
 /*
     TODO:
-    * Float64 in JSON are in Scientific Notation which is fine by JSON spec[x]
-    * Caching via Redis
     * Document What you have learned
+    * Allow for the rest of the shapefile types
+    * allow shapefile query by name
+    * Use file logger
+
+    URL Examples:
+    indicator data
+    [host]/[slug]?time=<validtime>&geos=<id,id,id>&geoms=t<optional_geojson>
+    127.0.0.1:8080/indicator/total-population?time=2000&geos=*
+
+    shpfiles
+    [host]/shp/?geoms=1,3,4,5<ids>
+
 */
 package main
 
