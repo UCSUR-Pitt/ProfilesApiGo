@@ -4,6 +4,7 @@
     * Allow for the rest of the shapefile types
     * allow shapefile query by name
     * Use file logger
+    * Add Way to find indicator slugs
 
     URL Examples:
     indicator data
