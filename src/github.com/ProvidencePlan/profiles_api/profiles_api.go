@@ -4,7 +4,8 @@
     * Allow for the rest of the shapefile types
     * allow shapefile query by name
     * Use file logger
-    * Add Way to find indicator slugs
+    * Add Way list indicator slugs
+    * Add Meta Data
 
     URL Examples:
     indicator data
@@ -68,6 +69,48 @@ func putInCache(connStr string, hash string, val []byte, expire int) {
 
 }
 
+
+// grab meta data for given ind in a new go routine
+func getMetaData(c chan []interface{}, db *sql.DB, ind_slug string) {
+    var (
+        indicator_id int
+        slug string
+        display_title string
+        time_key string
+    )
+
+    id_query := "SELECT indicator_id from profiles_flatvalue WHERE indicator_slug =$1 LIMIT 1";
+    err := db.QueryRow(id_query, ind_slug).Scan(&indicator_id)
+    if err != nil {
+        log.Println("Error preparing query %s in getMetaData", id_query)        
+    }
+    query := "SELECT DISTINCT indicator_slug, display_title, time_key from profiles_flatvalue WHERE indicator_id=$1;"
+    stmt, err := db.Prepare(query)
+    if err != nil {
+        log.Println("Error preparing query %s in getMetaData", query)
+    }
+    defer stmt.Close()
+    rows, err := stmt.Query(indicator_id)
+    if err != nil {
+        log.Println("Error running query %s in getMetaData", query)
+    }
+    results := []interface{}{}
+    for rows.Next() {
+        mrow := make(map[string]interface{})
+        err := rows.Scan(&slug, &display_title, &time_key)
+        if err != nil {
+            log.Println("Error running query %s in getMetaData", query)
+        }
+        mrow["slug"] = slug
+        mrow["title"] = display_title
+        mrow["time_key"] = time_key
+        results = append(results, mrow)
+    }
+
+    c <- results
+
+}
+
 // Indicator Api Handler. Returns values only
 func getData(ind string, time string, raw_geos string, conf CONFIG) []byte {
     hash := cache.MakeHash(ind + time + raw_geos)
@@ -78,7 +121,6 @@ func getData(ind string, time string, raw_geos string, conf CONFIG) []byte {
     }
 
     var (
-        //indicator_id int
         indicator_slug string
         display_title string
         geography_id int
@@ -141,7 +183,12 @@ func getData(ind string, time string, raw_geos string, conf CONFIG) []byte {
     if err != nil {
         log.Println("Error running query %s in getData", query)
     }
+
     results := []interface{}{}
+    metachan := make(chan []interface{}) // get the meta data
+    go getMetaData(metachan, db, ind)
+    data["related"] = <- metachan
+
     for rows.Next() {
         jrow := make(map[string]interface{})
         err := rows.Scan(&indicator_slug, &display_title, &geography_id, &geography_name, &geometry_id, &value_type, &time_key, &number, &percent, &moe, &f_number, &f_percent, &f_moe)
@@ -285,6 +332,9 @@ func getDataGeoJson(ind string, time string, raw_geos string, conf CONFIG) []byt
     }
 
     results := []interface{}{}
+    metachan := make(chan []interface{}) // get the meta data
+    go getMetaData(metachan, db, ind)
+    data["related"] = <- metachan
 
     for rows.Next() {
         jrow := make(map[string]interface{})
@@ -534,7 +584,6 @@ func main() {
             // include geoms
             r = getDataGeoJson(ind, time, raw_geos, conf)
             r := string(r[:])
-            
             if r == "405" {
                 return 405, "time and geos Parameters are Required"
             } else if r == "500" {
