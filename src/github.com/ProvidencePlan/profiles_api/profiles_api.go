@@ -2,7 +2,8 @@
     TODO:
     * Document What you have learned
     * Allow for the rest of the shapefile types
-    * allow shapefile query by name
+    * allow shapefile query by name (They are linked by geo_key)
+    * Get Geos By GeoLevel slug
     * Use file logger
     * Add Way list indicator slugs
     * Add Meta Data
@@ -82,7 +83,7 @@ func getMetaData(c chan []interface{}, db *sql.DB, ind_slug string) {
     id_query := "SELECT indicator_id from profiles_flatvalue WHERE indicator_slug =$1 LIMIT 1";
     err := db.QueryRow(id_query, ind_slug).Scan(&indicator_id)
     if err != nil {
-        log.Println("Error preparing query %s in getMetaData", id_query)        
+        log.Println("Error preparing query %s in getMetaData", id_query)
     }
     query := "SELECT DISTINCT indicator_slug, display_title, time_key from profiles_flatvalue WHERE indicator_id=$1;"
     stmt, err := db.Prepare(query)
@@ -473,6 +474,79 @@ func getGeomsById(geoms_ids string, conf CONFIG) []byte {
 }
 
 
+// Return a list of polygons that are IN or OF geom_id depending on what the geo_lev_id is
+func getGeoQuery(conf CONFIG, geoms_ids string, geo_lev_id string) []byte {
+
+    hash := cache.MakeHash("gGQ:" + geoms_ids + geo_lev_id)
+    c := getFromCache(conf.REDIS_CONN, hash)
+    if len(c) != 0{
+        log.Println("Serving getData from cache: ",  "gGQ:" + geoms_ids + geo_lev_id)
+        return c
+    }
+
+    cleaned_geoms, err := sanitize(geoms_ids, "[0-9,\\*]+")
+
+    if err != nil{
+        r:=[]byte("405")
+        return r
+    }
+    cleaned_geo_lev, err := sanitize(geo_lev_id, "[0-9]+")
+    if err != nil{
+        r:=[]byte("405")
+        return r
+    }
+
+    // First find the geom and join all the geometries
+    var (
+        geomId int
+        geoKey string
+    )
+    
+    geom_query := "SELECT a.id, a.geo_key FROM (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE geo_level=$1) as a, (SELECT geo_key, ST_Multi(ST_Union(geom)) as geom FROM maps_polygonmapfeature as f WHERE id IN ("+ cleaned_geoms +") GROUP BY geo_key) as b WHERE ST_Contains(b.geom, a.geom)"
+
+    //TODO: We tend to always run querires like this, why not abstract it
+    db, err := getDB(conf)
+    if err != nil {
+        log.Println("Error trying to call getDB")
+        r:=[]byte("500")
+        return r
+    }
+    defer db.Close()
+    stmt, err := db.Prepare(geom_query)
+    if err != nil {
+        log.Println("Error preparing query: ", geom_query)
+    }
+    defer stmt.Close()
+
+    rows, err := stmt.Query(cleaned_geo_lev)
+    
+    if err != nil {
+        log.Println("Error running query ", geom_query)
+    }
+
+    data := map[string]interface{}{} // this will be the object that wraps everything    
+    results := []interface{}{}
+    for rows.Next() {
+        jrow := make(map[string]interface{})
+        err := rows.Scan(&geomId, &geoKey)
+        if err == nil {
+            jrow["id"] = geomId
+            jrow["geoKey"] = geoKey
+            results = append(results, jrow)
+        }
+    }
+    data["objects"] = &results    
+    j, err := json.Marshal(data)
+
+    putInCache(conf.REDIS_CONN, hash, j, conf.CACHE_EXPIRE)
+
+    return j
+
+}
+
+
+
+
 /* --------------------UTILS -----------------*/
 
 func sanitize(input string, allowed string) (res string, err error) {
@@ -567,6 +641,7 @@ func main() {
     m:= martini.Classic()
     m.Get("/indicator/:slug", func(res http.ResponseWriter, req *http.Request, params martini.Params) (int, string) {
         res.Header().Set("Content-Type", "application/json")
+        res.Header().Set("Access-Control-Allow-Origin", "*")
         ind := params["slug"]
         time := req.FormValue("time")
         raw_geos := req.FormValue("geos")
@@ -596,6 +671,8 @@ func main() {
     })
 
     m.Get("/shp/", func (res http.ResponseWriter, req *http.Request) (int, string){
+        res.Header().Set("Content-Type", "application/json")
+        res.Header().Set("Access-Control-Allow-Origin", "*")
         var r []byte
         geoms := req.FormValue("geoms")
         r = getGeomsById(geoms, conf)
@@ -609,6 +686,25 @@ func main() {
         }
 
     })
+
+    m.Get("/shp/q/", func (res http.ResponseWriter, req *http.Request) (int, string){
+        res.Header().Set("Content-Type", "application/json")
+        res.Header().Set("Access-Control-Allow-Origin", "*")
+        var r []byte
+        geoms_ids := req.FormValue("geoms")
+        geo_lev_id := req.FormValue("lev")
+        r = getGeoQuery(conf, geoms_ids, geo_lev_id)
+        rs := string(r[:])
+        if rs == "405" {
+            return 405, "geoms Parameter is Required"
+        } else if rs == "500" {
+            return 500, "Server Error"
+        } else {
+            return 200, rs
+        }
+
+    })
+
 
     http.ListenAndServe(settings_port, m)
 }
