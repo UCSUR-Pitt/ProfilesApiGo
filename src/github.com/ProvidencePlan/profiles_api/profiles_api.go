@@ -340,69 +340,68 @@ func getDataGeoJson(ind string, time string, raw_geos string, conf CONFIG) []byt
     for rows.Next() {
         jrow := make(map[string]interface{})
         err := rows.Scan(&indicator_slug, &display_title, &geography_id, &geography_name, &geometry_id, &value_type, &time_key, &number, &percent, &moe, &f_number, &f_percent, &f_moe, &geom)
-        if err != nil {
-            log.Fatal(err)
-        }
-        if geom.Valid{
-            jrow = jsonLoads(geom.String)
-        }else{
-            jrow["coordinates"] = nil
-        }
-        properties := make(map[string]interface{})
-        properties["label"] = geography_name
-        properties["geography_id"] = geography_id
-        values := make(map[string]interface{})
-        values["indicator_slug"] = indicator_slug
-        values["value_type"] = value_type
-        values["time_key"] = time_key
-        if number.Valid{
-            values["number"] = number.Float64
-        }else{
-            values["number"] = nil
-        }
-        if value_type != "i"{
-            if percent.Valid{
-                values["percent"] = percent.Float64
+        if err == nil {
+            if geom.Valid{
+                jrow = jsonLoads(geom.String)
+            }else{
+                jrow["coordinates"] = nil
+            }
+            properties := make(map[string]interface{})
+            properties["label"] = geography_name
+            properties["geography_id"] = geography_id
+            values := make(map[string]interface{})
+            values["indicator_slug"] = indicator_slug
+            values["value_type"] = value_type
+            values["time_key"] = time_key
+            if number.Valid{
+                values["number"] = number.Float64
+            }else{
+                values["number"] = nil
+            }
+            if value_type != "i"{
+                if percent.Valid{
+                    values["percent"] = percent.Float64
+                }else{
+                    values["percent"] = nil
+                }
             }else{
                 values["percent"] = nil
             }
-        }else{
-            values["percent"] = nil
-        }
-        if moe.Valid{
-            values["moe"] = moe.Float64
-        }else{
-            values["moe"] = nil
-        }
+            if moe.Valid{
+                values["moe"] = moe.Float64
+            }else{
+                values["moe"] = nil
+            }
 
-        if f_number.Valid{
-            values["f_number"] = f_number.String
+            if f_number.Valid{
+                values["f_number"] = f_number.String
 
-        }else{
-            values["f_number"] = nil
-        }
-        if value_type != "i"{
-            if f_percent.Valid{
-                values["f_percent"] = f_percent.String
+            }else{
+                values["f_number"] = nil
+            }
+            if value_type != "i"{
+                if f_percent.Valid{
+                    values["f_percent"] = f_percent.String
 
+                }else{
+                    values["f_percent"] = nil
+                }
             }else{
                 values["f_percent"] = nil
             }
-        }else{
-            values["f_percent"] = nil
+
+            if f_moe.Valid{
+                values["f_moe"] = f_moe.String
+
+            }else{
+                values["f_moe"] = nil
+            }
+
+            jrow["properties"] = &properties
+            jrow["values"] = &values
+
+            results = append(results, jrow)
         }
-
-        if f_moe.Valid{
-            values["f_moe"] = f_moe.String
-
-        }else{
-            values["f_moe"] = nil
-        }
-
-        jrow["properties"] = &properties
-        jrow["values"] = &values
-
-        results = append(results, jrow)
     }
 
     data["objects"] = &results
@@ -475,23 +474,34 @@ func getGeomsById(geoms_ids string, conf CONFIG) []byte {
 
 
 // Return a list of polygons that are IN or OF geom_id depending on what the geo_lev_id is
-func getGeoQuery(conf CONFIG, geoms_ids string, geo_lev_id string) []byte {
+func getGeoQuery(conf CONFIG, geoms_ids string, geo_lev_id string, query_type string) []byte {
 
-    hash := cache.MakeHash("gGQ:" + geoms_ids + geo_lev_id)
+    hash := cache.MakeHash("gGQ:" + geoms_ids + geo_lev_id + query_type)
     c := getFromCache(conf.REDIS_CONN, hash)
     if len(c) != 0{
-        log.Println("Serving getData from cache: ",  "gGQ:" + geoms_ids + geo_lev_id)
+        log.Println("Serving getData from cache: ",  "gGQ:" + geoms_ids + geo_lev_id + query_type)
         return c
     }
 
     cleaned_geoms, err := sanitize(geoms_ids, "[0-9,\\*]+")
-
     if err != nil{
         r:=[]byte("405")
         return r
     }
+
     cleaned_geo_lev, err := sanitize(geo_lev_id, "[0-9]+")
     if err != nil{
+        r:=[]byte("405")
+        return r
+    }
+
+    cleaned_query_type, err := sanitize(query_type, "(IN|OF)")
+    if err != nil{
+        r:=[]byte("405")
+        return r
+    }
+    // also make sure the sanitized query_Type is IN or OF
+    if cleaned_query_type != "IN" && cleaned_query_type != "OF" {
         r:=[]byte("405")
         return r
     }
@@ -501,8 +511,15 @@ func getGeoQuery(conf CONFIG, geoms_ids string, geo_lev_id string) []byte {
         geomId int
         geoKey string
     )
-    
-    geom_query := "SELECT a.id, a.geo_key FROM (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE geo_level=$1) as a, (SELECT geo_key, ST_Multi(ST_Union(geom)) as geom FROM maps_polygonmapfeature as f WHERE id IN ("+ cleaned_geoms +") GROUP BY geo_key) as b WHERE ST_Contains(b.geom, a.geom)"
+    var geom_query string
+    if cleaned_query_type == "IN" { 
+        geom_query = "SELECT a.id, a.geo_key FROM (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE geo_level=$1) as a, (SELECT geo_key, ST_Multi(ST_Union(geom)) as geom FROM maps_polygonmapfeature as f WHERE id IN ("+ cleaned_geoms +") GROUP BY geo_key) as b WHERE ST_Contains(b.geom, a.geom)"
+    }else if cleaned_query_type == "OF"{
+        // find geoms that contain geom
+        // This is probably a better way to write the query above.
+        geom_query = "WITH levs AS (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE geo_level=$1), targ AS (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geoms + ") LIMIT 1) SELECT levs.id, levs.geo_key FROM levs, targ WHERE ST_Contains(levs.geom, targ.geom);"
+
+    }
 
     //TODO: We tend to always run querires like this, why not abstract it
     db, err := getDB(conf)
@@ -693,10 +710,11 @@ func main() {
         var r []byte
         geoms_ids := req.FormValue("geoms")
         geo_lev_id := req.FormValue("lev")
-        r = getGeoQuery(conf, geoms_ids, geo_lev_id)
+        query_type := req.FormValue("q")
+        r = getGeoQuery(conf, geoms_ids, geo_lev_id, query_type)
         rs := string(r[:])
         if rs == "405" {
-            return 405, "geoms Parameter is Required"
+            return 405, "geoms, lev and q are required "
         } else if rs == "500" {
             return 500, "Server Error"
         } else {
