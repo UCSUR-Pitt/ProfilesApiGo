@@ -16,6 +16,10 @@
     shpfiles
     [host]/shp/?geoms=1,3,4,5<ids>
 
+    shfiles geoquery
+    Ex: get geoms in geom(419) where lev = 6
+    [host]shp/q/?geoms=419&lev=6&q=IN
+
 */
 package main
 
@@ -474,6 +478,16 @@ func getGeomsById(geoms_ids string, conf CONFIG) []byte {
 
 
 // Return a list of polygons that are IN or OF geom_id depending on what the geo_lev_id is
+/* Example:
+    IN query
+    Find geoms of geolevel 6 that are in geom 419
+    http://127.0.0.1:8080/shp/q/?geoms=419&lev=6&q=IN
+    
+    OF query
+    Find geoms of geolevel 1 that contain geoms 380
+    http://127.0.0.1:8080/shp/q/?geoms=380&lev=1&q=OF
+
+*/
 func getGeoQuery(conf CONFIG, geoms_ids string, geo_lev_id string, query_type string) []byte {
 
     hash := cache.MakeHash("gGQ:" + geoms_ids + geo_lev_id + query_type)
@@ -510,10 +524,11 @@ func getGeoQuery(conf CONFIG, geoms_ids string, geo_lev_id string, query_type st
     var (
         geomId int
         geoKey string
+        label string
     )
     var geom_query string
     if cleaned_query_type == "IN" { 
-        geom_query = "SELECT a.id, a.geo_key FROM (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE geo_level=$1) as a, (SELECT geo_key, ST_Multi(ST_Union(geom)) as geom FROM maps_polygonmapfeature as f WHERE id IN ("+ cleaned_geoms +") GROUP BY geo_key) as b WHERE ST_Contains(b.geom, a.geom)"
+        geom_query = "SELECT a.id, a.geo_key, a.label FROM (SELECT id, geo_key, label, geom FROM maps_polygonmapfeature WHERE geo_level=$1) as a, (SELECT geo_key, ST_Multi(ST_Union(geom)) as geom FROM maps_polygonmapfeature as f WHERE id IN ("+ cleaned_geoms +") GROUP BY geo_key) as b WHERE ST_Contains(b.geom, ST_Centroid(a.geom))"
     }else if cleaned_query_type == "OF"{
         // find geoms that contain geom
         // This is probably a better way to write the query above.
@@ -545,14 +560,15 @@ func getGeoQuery(conf CONFIG, geoms_ids string, geo_lev_id string, query_type st
     results := []interface{}{}
     for rows.Next() {
         jrow := make(map[string]interface{})
-        err := rows.Scan(&geomId, &geoKey)
+        err := rows.Scan(&geomId, &geoKey, &label)
         if err == nil {
             jrow["id"] = geomId
             jrow["geoKey"] = geoKey
+            jrow["label"] = label
             results = append(results, jrow)
         }
     }
-    data["objects"] = &results    
+    data["objects"] = &results
     j, err := json.Marshal(data)
 
     putInCache(conf.REDIS_CONN, hash, j, conf.CACHE_EXPIRE)
