@@ -2,11 +2,9 @@
     TODO:
     * Document What you have learned
     * Allow for the rest of the shapefile types
-    * allow shapefile query by name (They are linked by geo_key)
-    * Get Geos By GeoLevel slug
     * Use file logger
     * Add Way list indicator slugs
-    * Add Meta Data
+    * ADD CORS info to config
 
     URL Examples:
     indicator data
@@ -14,11 +12,14 @@
     127.0.0.1:8080/indicator/total-population?time=2000&geos=*
 
     shpfiles
-    [host]/shp/?geoms=1,3,4,5<ids>
-
-    shfiles geoquery
+    [host]/shp/?geoms=1,3,4,5<ids> Arbitrary Geometry Id TODO: accomodate different types ( POINT, LINE )
+    
+    shpfiles geoquery
     Ex: get geoms in geom(419) where lev = 6
     [host]shp/q/?geoms=419&lev=6&q=IN
+
+    get geography by level
+    [host]/geos/level/:slug
 
 */
 package main
@@ -416,6 +417,8 @@ func getDataGeoJson(ind string, time string, raw_geos string, conf CONFIG) []byt
     return j
 }
 
+
+// Get Geoms by a list of geometry ids
 func getGeomsById(geoms_ids string, conf CONFIG) []byte {
     /*
         geoms_ids is a comma delimited string
@@ -433,6 +436,12 @@ func getGeomsById(geoms_ids string, conf CONFIG) []byte {
         label string
     )
 
+    cleaned_geos, err := sanitize(geoms_ids, "[0-9,\\*]+")
+
+    if err != nil{
+        r:=[]byte("405")
+        return r
+    }
     db, err := getDB(conf)
 	if err != nil {
 		log.Println("Error trying to call getDB")
@@ -440,13 +449,7 @@ func getGeomsById(geoms_ids string, conf CONFIG) []byte {
         return r
 	}
     defer db.Close()
-    
-    cleaned_geos, err := sanitize(geoms_ids, "[0-9,\\*]+")
 
-    if err != nil{
-        r:=[]byte("405")
-        return r
-    }
 
     rows, err := db.Query("SELECT geo_key, label, ST_AsGeoJSON(geom) FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geos + ")")
 
@@ -527,12 +530,12 @@ func getGeoQuery(conf CONFIG, geoms_ids string, geo_lev_id string, query_type st
         label string
     )
     var geom_query string
-    if cleaned_query_type == "IN" { 
-        geom_query = "SELECT a.id, a.geo_key, a.label FROM (SELECT id, geo_key, label, geom FROM maps_polygonmapfeature WHERE geo_level=$1) as a, (SELECT geo_key, ST_Multi(ST_Union(geom)) as geom FROM maps_polygonmapfeature as f WHERE id IN ("+ cleaned_geoms +") GROUP BY geo_key) as b WHERE ST_Contains(b.geom, ST_Centroid(a.geom))"
+    if cleaned_query_type == "IN" {
+        // find geoms contained in this geom
+        geom_query = "WITH targ_levs AS (SELECT id, geo_key, geom, label FROM maps_polygonmapfeature WHERE geo_level=$1), targ_geom AS (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geoms + ") LIMIT 1) SELECT targ_levs.id, targ_levs.geo_key, targ_levs.label FROM targ_levs, targ_geom WHERE ST_Contains(targ_geom.geom, ST_Centroid(targ_levs.geom))"
     }else if cleaned_query_type == "OF"{
         // find geoms that contain geom
-        // This is probably a better way to write the query above.
-        geom_query = "WITH levs AS (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE geo_level=$1), targ AS (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geoms + ") LIMIT 1) SELECT levs.id, levs.geo_key FROM levs, targ WHERE ST_Contains(levs.geom, targ.geom);"
+        geom_query = "WITH levs AS (SELECT id, geo_key, geom, label FROM maps_polygonmapfeature WHERE geo_level=$1), targ AS (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geoms + ") LIMIT 1) SELECT levs.id, levs.geo_key, levs.label FROM levs, targ WHERE ST_Contains(levs.geom, ST_Centroid(targ.geom))"
 
     }
 
@@ -551,7 +554,6 @@ func getGeoQuery(conf CONFIG, geoms_ids string, geo_lev_id string, query_type st
     defer stmt.Close()
 
     rows, err := stmt.Query(cleaned_geo_lev)
-    
     if err != nil {
         log.Println("Error running query ", geom_query)
     }
@@ -566,6 +568,8 @@ func getGeoQuery(conf CONFIG, geoms_ids string, geo_lev_id string, query_type st
             jrow["geoKey"] = geoKey
             jrow["label"] = label
             results = append(results, jrow)
+        }else{
+            log.Println("Error in row: %s ", err)
         }
     }
     data["objects"] = &results
@@ -577,7 +581,66 @@ func getGeoQuery(conf CONFIG, geoms_ids string, geo_lev_id string, query_type st
 
 }
 
+// Return GeoRecords by Level slug
+func getGeosByLevSlug(conf CONFIG, levslug string) []byte {
+    hash := cache.MakeHash("gGByLS:" + levslug)
 
+    c := getFromCache(conf.REDIS_CONN, hash)
+    if len(c) != 0{
+        log.Println("Serving getData from cache: ",  "gGbyLS:" + levslug )
+        return c
+    }
+
+    var (
+        id int
+        slug string
+        name string
+    )
+
+    cleaned_slug, err := sanitize(levslug, "[-\\w]+")
+    if err != nil{
+        r:=[]byte("405")
+        return r
+    }
+
+    db, err := getDB(conf)
+	if err != nil {
+		log.Println("Error trying to call getDB")
+        r:=[]byte("500")
+        return r
+	}
+    defer db.Close()
+    
+    query := "SELECT profiles_georecord.geo_id, profiles_georecord.slug, profiles_georecord.name FROM profiles_geolevel FULL JOIN profiles_georecord ON profiles_georecord.level_id = profiles_geolevel.id WHERE profiles_geolevel.slug=$1"
+    
+    rows, err := db.Query(query, cleaned_slug)
+    if err != nil {
+        log.Println("Error runnning query: %s", query)
+        r:=[]byte("500")
+        return r
+    }
+    defer rows.Close()
+
+    data := map[string]interface{}{} // this will be the object that wraps everything
+    results := []interface{}{}
+    for rows.Next() {
+        err := rows.Scan(&id, &slug, &name)
+        if err == nil {
+            jrow := make(map[string]interface{})
+            jrow["geoKey"] = id
+            jrow["slug"]= slug
+            jrow["name"]= name
+            results = append(results, jrow)
+        }
+    }
+
+    data["objects"] = &results
+    j, err := json.Marshal(data)
+
+    putInCache(conf.REDIS_CONN, hash, j, conf.CACHE_EXPIRE)
+
+    return j
+}
 
 
 /* --------------------UTILS -----------------*/
@@ -738,6 +801,23 @@ func main() {
         }
 
     })
+
+    m.Get("/geos/level/:slug", func(res http.ResponseWriter, req *http.Request, params martini.Params)(int, string){
+        res.Header().Set("Content-Type", "application/json")
+        res.Header().Set("Access-Control-Allow-Origin", "*")
+        var r []byte
+        r = getGeosByLevSlug(conf, params["slug"])
+        rs := string(r[:])
+        if rs == "405" {
+            return 405, "valid slug is required"
+        } else if rs == "500" {
+            return 500, "Server Error"
+        } else {
+            return 200, rs
+        }
+
+
+    });
 
 
     http.ListenAndServe(settings_port, m)
