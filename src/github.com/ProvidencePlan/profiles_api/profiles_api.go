@@ -5,20 +5,22 @@
     * Use file logger
     * Add Way list indicator slugs
     * ADD CORS info to config
+    * Need to support Multiple Times
 
     URL Examples:
     indicator data
-    [host]/[slug]?time=<validtime>&geos=<id,id,id>&geoms=t<optional_geojson>
+    [host]/[slug]?time=<validtime>&geos=<id,id,id>&geom=t<optional_geojson-that will return the geometry>
     127.0.0.1:8080/indicator/total-population?time=2000&geos=*
+
 
     shpfiles
     [host]/shp/?geoms=1,3,4,5<ids> Arbitrary Geometry Id TODO: accomodate different types ( POINT, LINE )
     
     shpfiles geoquery
-    Ex: get geoms in geom(419) where lev = 6
+    Ex: get geoms in a specific geom Ex: 419 where lev = 6
     [host]shp/q/?geoms=419&lev=6&q=IN
 
-    get geography by level
+    get geographies by level
     [host]/geos/level/:slug
 
 */
@@ -74,7 +76,6 @@ func putInCache(connStr string, hash string, val []byte, expire int) {
     }
 
 }
-
 
 // grab meta data for given ind in a new go routine
 func getMetaData(c chan []interface{}, db *sql.DB, ind_slug string) {
@@ -263,7 +264,7 @@ func getData(ind string, time string, raw_geos string, conf CONFIG) []byte {
 }
 
 func getDataGeoJson(ind string, time string, raw_geos string, conf CONFIG) []byte {
-    // The GeoJSON version of this
+    // Join indicator data with shapefiles geoms
     hash := cache.MakeHash("gdgj:" + ind + time + raw_geos)
     c := getFromCache(conf.REDIS_CONN, hash)
     if len(c) != 0{
@@ -312,7 +313,7 @@ func getDataGeoJson(ind string, time string, raw_geos string, conf CONFIG) []byt
         return r
 	}
     defer db.Close()
-    var base_query = "SELECT profiles_flatvalue.indicator_slug, profiles_flatvalue.display_title, profiles_flatvalue.geography_id, profiles_flatvalue.geography_name, profiles_flatvalue.geometry_id, profiles_flatvalue.value_type, profiles_flatvalue.time_key, profiles_flatvalue.number, profiles_flatvalue.percent, profiles_flatvalue.moe, profiles_flatvalue.f_number, profiles_flatvalue.f_percent, profiles_flatvalue.f_moe, ST_AsGeoJSON(maps_polygonmapfeature.geom) AS geom FROM profiles_flatvalue LEFT OUTER JOIN maps_polygonmapfeature ON (maps_polygonmapfeature.id = profiles_flatvalue.geometry_id) WHERE profiles_flatvalue.indicator_slug = $1 AND time_key= $2"
+    var base_query = "SELECT profiles_flatvalue.indicator_slug, profiles_flatvalue.display_title, profiles_flatvalue.geography_id, profiles_flatvalue.geography_name, profiles_flatvalue.geometry_id, profiles_flatvalue.value_type, profiles_flatvalue.time_key, profiles_flatvalue.number, profiles_flatvalue.percent, profiles_flatvalue.moe, profiles_flatvalue.f_number, profiles_flatvalue.f_percent, profiles_flatvalue.f_moe, ST_AsGeoJSON(maps_polygonmapfeature.geom) AS geom FROM profiles_flatvalue LEFT OUTER JOIN maps_polygonmapfeature ON (profiles_flatvalue.geography_geo_key = maps_polygonmapfeature.geo_key) WHERE profiles_flatvalue.indicator_slug = $1 AND profiles_flatvalue.time_key= $2"
     var query string 
 
     // we need to support getting * geos or specific ones via thier ids also we need to be able to join on a geom
@@ -320,9 +321,8 @@ func getDataGeoJson(ind string, time string, raw_geos string, conf CONFIG) []byt
         query = base_query
 
     }else{
-        query = base_query + "AND profile_flatvalue.geography_id IN (" +cleaned_geos + ")"
+        query = base_query + " AND profiles_flatvalue.geography_id IN (" +cleaned_geos + ")"
     }
-
     stmt, err := db.Prepare(query)
     if err != nil {
         log.Println("Error runnning query: getDataGeoJson")
@@ -418,6 +418,72 @@ func getDataGeoJson(ind string, time string, raw_geos string, conf CONFIG) []byt
 }
 
 
+func getGeomsByGeosId(geos_ids string, conf CONFIG) []byte {
+    /*
+        geos_ids is a comma delimited string of IDS found in the profiles_georecord_table
+    */
+
+    hash := cache.MakeHash("shp:" + geos_ids)    
+    c := getFromCache(conf.REDIS_CONN, hash)
+    if len(c) != 0{
+        log.Println("Serving getData from shp cache:", geos_ids)
+        return c
+    }
+    var (
+        geos_id int
+        geos_name string
+        geos_slug string
+        geo_key string
+        geom string
+    )
+
+    cleaned_geos, err := sanitize(geos_ids, "[0-9,\\*]+")
+
+     if err != nil{
+        r:=[]byte("405")
+        return r
+    }
+    db, err := getDB(conf)
+	if err != nil {
+		log.Println("Error trying to call getDB")
+        r:=[]byte("500")
+        return r
+	}
+    defer db.Close()
+
+    base_query := "SELECT profiles_georecord.geo_id, profiles_georecord.name, profiles_georecord.slug, profiles_georecord.geo_id, ST_ASGeoJSON(maps_polygonmapfeature.geom) as geom FROM profiles_georecord, maps_polygonmapfeature WHERE profiles_georecord.id IN(" + cleaned_geos + ") AND profiles_georecord.geo_id = maps_polygonmapfeature.geo_key"
+    rows, err := db.Query(base_query)
+    if err != nil {
+        log.Println("Error runnning query: getGeomsByGeosId")
+        r:=[]byte("500")
+        return r
+    }
+    defer rows.Close()
+    
+    data := map[string]interface{}{} // this will be the object that wraps everything
+
+    results := []interface{}{}
+    for rows.Next() {
+        err := rows.Scan(&geos_id, &geos_name, &geos_slug, &geo_key, &geom)
+        if err == nil {
+            properties := make(map[string]interface{})
+            properties["geo_key"] = geo_key
+            properties["label"] = geos_name
+            properties["slug"] = geos_slug
+            geom := jsonLoads(geom)
+            geom["properties"] = &properties
+
+            results = append(results, geom)
+        }
+    }
+    data["objects"] = &results
+    j, err := json.Marshal(data)
+    putInCache(conf.REDIS_CONN, hash, j, conf.CACHE_EXPIRE)
+    return j
+
+}
+
+
 // Get Geoms by a list of geometry ids
 func getGeomsById(geoms_ids string, conf CONFIG) []byte {
     /*
@@ -465,10 +531,10 @@ func getGeomsById(geoms_ids string, conf CONFIG) []byte {
         err := rows.Scan(&geo_key, &label, &geom)
         if err == nil {
             properties := make(map[string]interface{})
-            properties["geo_key"] = &geo_key
-            properties["label"] = &label
+            properties["geo_key"] = geo_key
+            properties["label"] = label
             geom := jsonLoads(geom)
-            geom["properties"] = &properties
+            geom["properties"] = properties
 
             results = append(results, geom)
         }
@@ -522,23 +588,24 @@ func getGeoQuery(conf CONFIG, geoms_ids string, geo_lev_id string, query_type st
         r:=[]byte("405")
         return r
     }
-
-    // First find the geom and join all the geometries
     var (
         geomId int
+        geosId int
         geoKey string
         label string
+        slug string
     )
     var geom_query string
     if cleaned_query_type == "IN" {
         // find geoms contained in this geom
-        geom_query = "WITH targ_levs AS (SELECT id, geo_key, geom, label FROM maps_polygonmapfeature WHERE geo_level=$1), targ_geom AS (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geoms + ") LIMIT 1) SELECT targ_levs.id, targ_levs.geo_key, targ_levs.label FROM targ_levs, targ_geom WHERE ST_Contains(targ_geom.geom, ST_Centroid(targ_levs.geom))"
+        geom_query = "WITH targ_levs AS (SELECT maps_polygonmapfeature.id as geom_id, maps_polygonmapfeature.geo_key, maps_polygonmapfeature.geom, profiles_georecord.id as id, profiles_georecord.slug, profiles_georecord.name as label FROM maps_polygonmapfeature, profiles_georecord WHERE geo_level=$1 AND maps_polygonmapfeature.geo_key=profiles_georecord.geo_id), targ_geom AS (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geoms + ") LIMIT 1) SELECT targ_levs.id, targ_levs.geom_id, targ_levs.geo_key, targ_levs.label, targ_levs.slug FROM targ_levs, targ_geom WHERE ST_Contains(targ_geom.geom, ST_Centroid(targ_levs.geom))"
+
     }else if cleaned_query_type == "OF"{
         // find geoms that contain geom
+        // TODO: FIX THIS to be like above query
         geom_query = "WITH levs AS (SELECT id, geo_key, geom, label FROM maps_polygonmapfeature WHERE geo_level=$1), targ AS (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geoms + ") LIMIT 1) SELECT levs.id, levs.geo_key, levs.label FROM levs, targ WHERE ST_Contains(levs.geom, ST_Centroid(targ.geom))"
 
     }
-
     //TODO: We tend to always run querires like this, why not abstract it
     db, err := getDB(conf)
     if err != nil {
@@ -548,25 +615,27 @@ func getGeoQuery(conf CONFIG, geoms_ids string, geo_lev_id string, query_type st
     }
     defer db.Close()
     stmt, err := db.Prepare(geom_query)
+
     if err != nil {
         log.Println("Error preparing query: ", geom_query)
     }
     defer stmt.Close()
-
+    
     rows, err := stmt.Query(cleaned_geo_lev)
     if err != nil {
         log.Println("Error running query ", geom_query)
     }
-
     data := map[string]interface{}{} // this will be the object that wraps everything    
     results := []interface{}{}
     for rows.Next() {
         jrow := make(map[string]interface{})
-        err := rows.Scan(&geomId, &geoKey, &label)
+        err := rows.Scan(&geosId, &geomId, &geoKey, &label, &slug)
         if err == nil {
-            jrow["id"] = geomId
+            jrow["id"] = geosId
+            jrow["geom_id"] = geomId
             jrow["geoKey"] = geoKey
             jrow["label"] = label
+            jrow["slug"] = slug
             results = append(results, jrow)
         }else{
             log.Println("Error in row: %s ", err)
@@ -770,11 +839,11 @@ func main() {
         res.Header().Set("Content-Type", "application/json")
         res.Header().Set("Access-Control-Allow-Origin", "*")
         var r []byte
-        geoms := req.FormValue("geoms")
-        r = getGeomsById(geoms, conf)
+        geos := req.FormValue("geos")
+        r = getGeomsByGeosId(geos, conf)
         rs := string(r[:])
         if rs == "405" {
-            return 405, "geoms Parameter is Required"
+            return 405, "geos Parameter is Required"
         } else if rs == "500" {
             return 500, "Server Error"
         } else {
