@@ -603,7 +603,7 @@ func getGeoQuery(conf CONFIG, geoms_ids string, geo_lev_id string, query_type st
     }else if cleaned_query_type == "OF"{
         // find geoms that contain geom
         // TODO: FIX THIS to be like above query
-        geom_query = "WITH levs AS (SELECT id, geo_key, geom, label FROM maps_polygonmapfeature WHERE geo_level=$1), targ AS (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geoms + ") LIMIT 1) SELECT levs.id, levs.geo_key, levs.label FROM levs, targ WHERE ST_Contains(levs.geom, ST_Centroid(targ.geom))"
+        geom_query = "WITH levs AS (SELECT maps_polygonmapfeature.id as geom_id, maps_polygonmapfeature.geo_key, maps_polygonmapfeature.geom, profiles_georecord.id as id, profiles_georecord.slug, profiles_georecord.name as label FROM maps_polygonmapfeature, profiles_georecord  WHERE level_id=$1 AND maps_polygonmapfeature.geo_key=profiles_georecord.geo_id), targ AS (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geoms + ") LIMIT 1) SELECT levs.id, levs.geom_id, levs.geo_key, levs.label, levs.slug FROM levs, targ WHERE ST_Contains(levs.geom, ST_Centroid(targ.geom))"
 
     }
     //TODO: We tend to always run querires like this, why not abstract it
