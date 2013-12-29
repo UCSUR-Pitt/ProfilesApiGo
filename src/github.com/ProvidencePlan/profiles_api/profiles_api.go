@@ -662,6 +662,7 @@ func getGeosByLevSlug(conf CONFIG, levslug string) []byte {
 
     var (
         id int
+        geoKey string
         slug string
         name string
     )
@@ -680,7 +681,7 @@ func getGeosByLevSlug(conf CONFIG, levslug string) []byte {
 	}
     defer db.Close()
     
-    query := "SELECT profiles_georecord.geo_id, profiles_georecord.slug, profiles_georecord.name FROM profiles_geolevel FULL JOIN profiles_georecord ON profiles_georecord.level_id = profiles_geolevel.id WHERE profiles_geolevel.slug=$1"
+    query := "SELECT profiles_georecord.id, profiles_georecord.geo_id, profiles_georecord.slug, profiles_georecord.name FROM profiles_geolevel FULL JOIN profiles_georecord ON profiles_georecord.level_id = profiles_geolevel.id WHERE profiles_geolevel.slug=$1"
     
     rows, err := db.Query(query, cleaned_slug)
     if err != nil {
@@ -693,10 +694,11 @@ func getGeosByLevSlug(conf CONFIG, levslug string) []byte {
     data := map[string]interface{}{} // this will be the object that wraps everything
     results := []interface{}{}
     for rows.Next() {
-        err := rows.Scan(&id, &slug, &name)
+        err := rows.Scan(&id, &geoKey, &slug, &name)
         if err == nil {
             jrow := make(map[string]interface{})
-            jrow["geoKey"] = id
+            jrow["id"] = id
+            jrow["geoKey"] = geoKey
             jrow["slug"]= slug
             jrow["name"]= name
             results = append(results, jrow)
