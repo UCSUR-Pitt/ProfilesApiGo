@@ -22,6 +22,9 @@
 
     get geographies by level
     [host]/geos/level/:slug
+    Optional:
+    ?filter=FUZZYMATCH via geokey
+
 
 */
 package main
@@ -598,12 +601,12 @@ func getGeoQuery(conf CONFIG, geoms_ids string, geo_lev_id string, query_type st
     var geom_query string
     if cleaned_query_type == "IN" {
         // find geoms contained in this geom
-        geom_query = "WITH targ_levs AS (SELECT maps_polygonmapfeature.id as geom_id, maps_polygonmapfeature.geo_key, maps_polygonmapfeature.geom, profiles_georecord.id as id, profiles_georecord.slug, profiles_georecord.name as label FROM maps_polygonmapfeature, profiles_georecord WHERE geo_level=$1 AND maps_polygonmapfeature.geo_key=profiles_georecord.geo_id), targ_geom AS (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geoms + ") LIMIT 1) SELECT targ_levs.id, targ_levs.geom_id, targ_levs.geo_key, targ_levs.label, targ_levs.slug FROM targ_levs, targ_geom WHERE ST_Contains(targ_geom.geom, ST_Centroid(targ_levs.geom))"
+        geom_query = "WITH targ_levs AS (SELECT maps_polygonmapfeature.id as geom_id, maps_polygonmapfeature.geo_key, maps_polygonmapfeature.geom, profiles_georecord.id as id, profiles_georecord.slug, profiles_georecord.name as label FROM maps_polygonmapfeature, profiles_georecord WHERE profiles_georecord.level_id=$1 AND maps_polygonmapfeature.geo_key=profiles_georecord.geo_id), targ_geom AS (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geoms + ") LIMIT 1) SELECT targ_levs.id, targ_levs.geom_id, targ_levs.geo_key, targ_levs.label, targ_levs.slug FROM targ_levs, targ_geom WHERE ST_Contains(targ_geom.geom, ST_Centroid(targ_levs.geom))"
 
     }else if cleaned_query_type == "OF"{
         // find geoms that contain geom
         // TODO: FIX THIS to be like above query
-        geom_query = "WITH levs AS (SELECT maps_polygonmapfeature.id as geom_id, maps_polygonmapfeature.geo_key, maps_polygonmapfeature.geom, profiles_georecord.id as id, profiles_georecord.slug, profiles_georecord.name as label FROM maps_polygonmapfeature, profiles_georecord  WHERE level_id=$1 AND maps_polygonmapfeature.geo_key=profiles_georecord.geo_id), targ AS (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geoms + ") LIMIT 1) SELECT levs.id, levs.geom_id, levs.geo_key, levs.label, levs.slug FROM levs, targ WHERE ST_Contains(levs.geom, ST_Centroid(targ.geom))"
+        geom_query = "WITH levs AS (SELECT maps_polygonmapfeature.id as geom_id, maps_polygonmapfeature.geo_key, maps_polygonmapfeature.geom, profiles_georecord.id as id, profiles_georecord.slug, profiles_georecord.name as label FROM maps_polygonmapfeature, profiles_georecord  WHERE profiles_georecord.level_id=$1 AND maps_polygonmapfeature.geo_key=profiles_georecord.geo_id), targ AS (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geoms + ") LIMIT 1) SELECT levs.id, levs.geom_id, levs.geo_key, levs.label, levs.slug FROM levs, targ WHERE ST_Contains(levs.geom, ST_Centroid(targ.geom))"
 
     }
     //TODO: We tend to always run querires like this, why not abstract it
@@ -651,8 +654,9 @@ func getGeoQuery(conf CONFIG, geoms_ids string, geo_lev_id string, query_type st
 }
 
 // Return GeoRecords by Level slug
-func getGeosByLevSlug(conf CONFIG, levslug string) []byte {
-    hash := cache.MakeHash("gGByLS:" + levslug)
+func getGeosByLevSlug(conf CONFIG, levslug string, filter_key string) []byte {
+
+    hash := cache.MakeHash("gGByLS:" + levslug + filter_key)
 
     c := getFromCache(conf.REDIS_CONN, hash)
     if len(c) != 0{
@@ -673,6 +677,13 @@ func getGeosByLevSlug(conf CONFIG, levslug string) []byte {
         return r
     }
 
+    cleaned_filter, err := sanitize(filter_key, "[-\\w\\d]+")
+    if err != nil{
+        //r:=[]byte("405")
+        //return r
+        cleaned_filter = ""
+    }
+
     db, err := getDB(conf)
 	if err != nil {
 		log.Println("Error trying to call getDB")
@@ -682,6 +693,10 @@ func getGeosByLevSlug(conf CONFIG, levslug string) []byte {
     defer db.Close()
     
     query := "SELECT profiles_georecord.id, profiles_georecord.geo_id, profiles_georecord.slug, profiles_georecord.name FROM profiles_geolevel FULL JOIN profiles_georecord ON profiles_georecord.level_id = profiles_geolevel.id WHERE profiles_geolevel.slug=$1"
+
+    if cleaned_filter != "" {
+        query += " AND profiles_georecord.geo_id ILIKE '%" + cleaned_filter +"%'"
+    }
     
     rows, err := db.Query(query, cleaned_slug)
     if err != nil {
@@ -876,8 +891,9 @@ func main() {
     m.Get("/geos/level/:slug", func(res http.ResponseWriter, req *http.Request, params martini.Params)(int, string){
         res.Header().Set("Content-Type", "application/json")
         res.Header().Set("Access-Control-Allow-Origin", "*")
+        filter := req.FormValue("filter") // a string to fuzzy match geokeys on
         var r []byte
-        r = getGeosByLevSlug(conf, params["slug"])
+        r = getGeosByLevSlug(conf, params["slug"], filter)
         rs := string(r[:])
         if rs == "405" {
             return 405, "valid slug is required"
