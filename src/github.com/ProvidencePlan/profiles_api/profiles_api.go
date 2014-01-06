@@ -6,6 +6,7 @@
     * Add Way list indicator slugs
     * ADD CORS info to config
     * Need to support Multiple Times
+    * Query error should return proper exit code
 
     URL Examples:
     indicator data
@@ -160,11 +161,9 @@ func getData(ind string, time string, raw_geos string, conf CONFIG) []byte {
         return r
 
     }
-    
+
     data := map[string]interface{}{} // this will be the object that wraps everything
 
-    //geos := strings.Split(raw_geos, ",") // Do commas make sense?
-    //db, err := sql.Open("postgres", "user=asmedrano dbname=cp_pitts_dev") // TODO:Abstract getting db
     db, err := getDB(conf)
 	if err != nil {
 		log.Println("Error trying to call getDB")
@@ -552,7 +551,7 @@ func getGeomsById(geoms_ids string, conf CONFIG) []byte {
 // Return a list of polygons that are IN or OF geom_id depending on what the geo_lev_id is
 /* Example:
     IN query
-    Find geoms of geolevel 6 that are in geom 419
+    Find geoms of geolevel 6 that are in geom 419. lev=N or *
     http://127.0.0.1:8080/shp/q/?geoms=419&lev=6&q=IN
     
     OF query
@@ -575,7 +574,7 @@ func getGeoQuery(conf CONFIG, geoms_ids string, geo_lev_id string, query_type st
         return r
     }
 
-    cleaned_geo_lev, err := sanitize(geo_lev_id, "[0-9]+")
+    cleaned_geo_lev, err := sanitize(geo_lev_id, "[0-9,]+") // supports mulitple levels
     if err != nil{
         r:=[]byte("405")
         return r
@@ -599,14 +598,15 @@ func getGeoQuery(conf CONFIG, geoms_ids string, geo_lev_id string, query_type st
         slug string
     )
     var geom_query string
+    where_clause := " WHERE profiles_georecord.level_id IN ("+ cleaned_geo_lev+") AND "
+
     if cleaned_query_type == "IN" {
         // find geoms contained in this geom
-        geom_query = "WITH targ_levs AS (SELECT maps_polygonmapfeature.id as geom_id, maps_polygonmapfeature.geo_key, maps_polygonmapfeature.geom, profiles_georecord.id as id, profiles_georecord.slug, profiles_georecord.name as label FROM maps_polygonmapfeature, profiles_georecord WHERE profiles_georecord.level_id=$1 AND maps_polygonmapfeature.geo_key=profiles_georecord.geo_id), targ_geom AS (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geoms + ") LIMIT 1) SELECT targ_levs.id, targ_levs.geom_id, targ_levs.geo_key, targ_levs.label, targ_levs.slug FROM targ_levs, targ_geom WHERE ST_Contains(targ_geom.geom, ST_Centroid(targ_levs.geom))"
+        geom_query = "WITH targ_levs AS (SELECT maps_polygonmapfeature.id as geom_id, maps_polygonmapfeature.geo_key, maps_polygonmapfeature.geom, profiles_georecord.id as id, profiles_georecord.slug, profiles_georecord.name as label FROM maps_polygonmapfeature, profiles_georecord"+ where_clause+ "maps_polygonmapfeature.geo_key=profiles_georecord.geo_id), targ_geom AS (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geoms + ") LIMIT 1) SELECT targ_levs.id, targ_levs.geom_id, targ_levs.geo_key, targ_levs.label, targ_levs.slug FROM targ_levs, targ_geom WHERE ST_Contains(targ_geom.geom, ST_Centroid(targ_levs.geom))"
 
     }else if cleaned_query_type == "OF"{
         // find geoms that contain geom
-        // TODO: FIX THIS to be like above query
-        geom_query = "WITH levs AS (SELECT maps_polygonmapfeature.id as geom_id, maps_polygonmapfeature.geo_key, maps_polygonmapfeature.geom, profiles_georecord.id as id, profiles_georecord.slug, profiles_georecord.name as label FROM maps_polygonmapfeature, profiles_georecord  WHERE profiles_georecord.level_id=$1 AND maps_polygonmapfeature.geo_key=profiles_georecord.geo_id), targ AS (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geoms + ") LIMIT 1) SELECT levs.id, levs.geom_id, levs.geo_key, levs.label, levs.slug FROM levs, targ WHERE ST_Contains(levs.geom, ST_Centroid(targ.geom))"
+        geom_query = "WITH levs AS (SELECT maps_polygonmapfeature.id as geom_id, maps_polygonmapfeature.geo_key, maps_polygonmapfeature.geom, profiles_georecord.id as id, profiles_georecord.slug, profiles_georecord.name as label FROM maps_polygonmapfeature, profiles_georecord"+ where_clause +"maps_polygonmapfeature.geo_key=profiles_georecord.geo_id), targ AS (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geoms + ") LIMIT 1) SELECT levs.id, levs.geom_id, levs.geo_key, levs.label, levs.slug FROM levs, targ WHERE ST_Contains(levs.geom, ST_Centroid(targ.geom))"
 
     }
     //TODO: We tend to always run querires like this, why not abstract it
@@ -621,12 +621,17 @@ func getGeoQuery(conf CONFIG, geoms_ids string, geo_lev_id string, query_type st
 
     if err != nil {
         log.Println("Error preparing query: ", geom_query)
+        r:=[]byte("405")
+        return r
     }
     defer stmt.Close()
-    
-    rows, err := stmt.Query(cleaned_geo_lev)
+
+    rows, err := stmt.Query()
+
     if err != nil {
         log.Println("Error running query ", geom_query)
+        r:=[]byte("405")
+        return r
     }
     data := map[string]interface{}{} // this will be the object that wraps everything    
     results := []interface{}{}
