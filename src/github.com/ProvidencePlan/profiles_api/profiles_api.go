@@ -36,6 +36,7 @@ import (
     "strings"
     "log"
     "github.com/codegangsta/martini"
+    "github.com/codegangsta/martini-contrib/gzip"
     _ "github.com/lib/pq"
     "database/sql"
     "net/http"
@@ -46,6 +47,7 @@ import (
     "io/ioutil"
     "github.com/ProvidencePlan/profiles_api/cache"
 
+
 )
 
 type CONFIG struct {
@@ -55,6 +57,7 @@ type CONFIG struct {
         DB_USER string
         DB_PASS string
         REDIS_CONN string //host and port ex: 127.0.0.1:6379
+        REDIS_HASH_PREFIX string // prefix to put infront of a hash string
         CACHE_EXPIRE int
 }
 
@@ -124,7 +127,7 @@ func getMetaData(c chan []interface{}, db *sql.DB, ind_slug string) {
 
 // Indicator Api Handler. Returns values only
 func getData(ind string, time string, raw_geos string, conf CONFIG) []byte {
-    hash := cache.MakeHash(ind + time + raw_geos)
+    hash := cache.MakeHash(conf.REDIS_HASH_PREFIX + ind + time + raw_geos)
     c := getFromCache(conf.REDIS_CONN, hash)
     if len(c) != 0{
         log.Println("Serving getData from cache: ", ind + time + raw_geos)
@@ -267,7 +270,7 @@ func getData(ind string, time string, raw_geos string, conf CONFIG) []byte {
 
 func getDataGeoJson(ind string, time string, raw_geos string, conf CONFIG) []byte {
     // Join indicator data with shapefiles geoms
-    hash := cache.MakeHash("gdgj:" + ind + time + raw_geos)
+    hash := cache.MakeHash(conf.REDIS_HASH_PREFIX + "gdgj:" + ind + time + raw_geos)
     c := getFromCache(conf.REDIS_CONN, hash)
     if len(c) != 0{
         log.Println("Serving getData from cache gdgj: ", ind + time + raw_geos)
@@ -425,7 +428,7 @@ func getGeomsByGeosId(geos_ids string, conf CONFIG) []byte {
         geos_ids is a comma delimited string of IDS found in the profiles_georecord_table
     */
 
-    hash := cache.MakeHash("shp:" + geos_ids)    
+    hash := cache.MakeHash(conf.REDIS_HASH_PREFIX + "shp:" + geos_ids)    
     c := getFromCache(conf.REDIS_CONN, hash)
     if len(c) != 0{
         log.Println("Serving getData from shp cache:", geos_ids)
@@ -491,7 +494,7 @@ func getGeomsById(geoms_ids string, conf CONFIG) []byte {
     /*
         geoms_ids is a comma delimited string
     */
-    hash := cache.MakeHash("shp:" + geoms_ids)
+    hash := cache.MakeHash(conf.REDIS_HASH_PREFIX + "shp:" + geoms_ids)
     c := getFromCache(conf.REDIS_CONN, hash)
     if len(c) != 0{
         log.Println("Serving getData from shp cache:", geoms_ids)
@@ -561,7 +564,7 @@ func getGeomsById(geoms_ids string, conf CONFIG) []byte {
 */
 func getGeoQuery(conf CONFIG, geoms_ids string, geo_lev_id string, query_type string) []byte {
 
-    hash := cache.MakeHash("gGQ:" + geoms_ids + geo_lev_id + query_type)
+    hash := cache.MakeHash(conf.REDIS_HASH_PREFIX + "gGQ:" + geoms_ids + geo_lev_id + query_type)
     c := getFromCache(conf.REDIS_CONN, hash)
     if len(c) != 0{
         log.Println("Serving getData from cache: ",  "gGQ:" + geoms_ids + geo_lev_id + query_type)
@@ -661,7 +664,7 @@ func getGeoQuery(conf CONFIG, geoms_ids string, geo_lev_id string, query_type st
 // Return GeoRecords by Level slug
 func getGeosByLevSlug(conf CONFIG, levslug string, filter_key string) []byte {
 
-    hash := cache.MakeHash("gGByLS:" + levslug + filter_key)
+    hash := cache.MakeHash(conf.REDIS_HASH_PREFIX + "gGByLS:" + levslug + filter_key)
 
     c := getFromCache(conf.REDIS_CONN, hash)
     if len(c) != 0{
@@ -826,6 +829,7 @@ func main() {
     log.Printf("Starting Server on %s", settings_port)
     conf := getConf(settings_path)
     m:= martini.Classic()
+    m.Use(gzip.All())
     m.Get("/indicator/:slug", func(res http.ResponseWriter, req *http.Request, params martini.Params) (int, string) {
         res.Header().Set("Content-Type", "application/json")
         res.Header().Set("Access-Control-Allow-Origin", "*")
