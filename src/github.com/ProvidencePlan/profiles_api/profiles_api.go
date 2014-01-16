@@ -4,7 +4,6 @@
     * Allow for the rest of the shapefile types
     * Use file logger
     * Add Way list indicator slugs
-    * ADD CORS info to config
     * Need to support Multiple Times
     * Query error should return proper exit code
 
@@ -93,7 +92,7 @@ func getMetaData(c chan []interface{}, db *sql.DB, ind_slug string) {
     id_query := "SELECT indicator_id from profiles_flatvalue WHERE indicator_slug =$1 LIMIT 1";
     err := db.QueryRow(id_query, ind_slug).Scan(&indicator_id)
     if err != nil {
-        log.Println("Error preparing query %s in getMetaData", id_query)
+        log.Println("Error running query in getMetaData", id_query, "params:" + ind_slug , err)
     }
     query := "SELECT DISTINCT indicator_slug, display_title, time_key from profiles_flatvalue WHERE indicator_id=$1;"
     stmt, err := db.Prepare(query)
@@ -155,11 +154,10 @@ func getData(ind string, time string, raw_geos string, conf CONFIG) []byte {
         return r
     }
 
-    cleaned_time, err := sanitize(time, "[0-9,\\*]+")
+    cleaned_time, err := sanitize(time, "[0-9,\\*\\-\\s]+")
     if err != nil{
         r:=[]byte("405")
         return r
-
     }
 
     data := map[string]interface{}{} // this will be the object that wraps everything
@@ -259,8 +257,10 @@ func getData(ind string, time string, raw_geos string, conf CONFIG) []byte {
     data["objects"] = &results
 
     j, err := json.Marshal(data)
-
-    putInCache(conf.REDIS_CONN, hash, j, conf.CACHE_EXPIRE)
+    
+    if len(results) != 0{
+        putInCache(conf.REDIS_CONN, hash, j, conf.CACHE_EXPIRE)
+    }
 
     return j
 }
@@ -299,7 +299,7 @@ func getDataGeoJson(ind string, time string, raw_geos string, conf CONFIG) []byt
         return r
     }
 
-    cleaned_time, err := sanitize(time, "[0-9,\\*]+")
+    cleaned_time, err := sanitize(time, "[0-9,\\*\\-\\s]+")
     if err != nil{
         r:=[]byte("405")
         return r
@@ -413,8 +413,10 @@ func getDataGeoJson(ind string, time string, raw_geos string, conf CONFIG) []byt
 
     data["objects"] = &results
     j, err := json.Marshal(data)
-
-    putInCache(conf.REDIS_CONN, hash, j, conf.CACHE_EXPIRE)
+    
+    if len(results)!= 0{
+        putInCache(conf.REDIS_CONN, hash, j, conf.CACHE_EXPIRE)
+    }
 
     return j
 }
@@ -480,7 +482,11 @@ func getGeomsByGeosId(geos_ids string, conf CONFIG) []byte {
     }
     data["objects"] = &results
     j, err := json.Marshal(data)
-    putInCache(conf.REDIS_CONN, hash, j, conf.CACHE_EXPIRE)
+
+    if len(results) != 0 {
+        putInCache(conf.REDIS_CONN, hash, j, conf.CACHE_EXPIRE)
+    }
+
     return j
 
 }
@@ -527,6 +533,7 @@ func getGeomsById(geoms_ids string, conf CONFIG) []byte {
         return r
     }
     defer rows.Close()
+
     data := map[string]interface{}{} // this will be the object that wraps everything
     results := []interface{}{}
     for rows.Next() {
@@ -543,7 +550,11 @@ func getGeomsById(geoms_ids string, conf CONFIG) []byte {
     }
     data["objects"] = &results
     j, err := json.Marshal(data)
-    putInCache(conf.REDIS_CONN, hash, j, conf.CACHE_EXPIRE)
+
+    if len(results) != 0{
+        putInCache(conf.REDIS_CONN, hash, j, conf.CACHE_EXPIRE)
+    }
+
     return j
 }
 
@@ -652,7 +663,9 @@ func getGeoQuery(conf CONFIG, geoms_ids string, geo_lev_id string, query_type st
     data["objects"] = &results
     j, err := json.Marshal(data)
 
-    putInCache(conf.REDIS_CONN, hash, j, conf.CACHE_EXPIRE)
+    if len(results) != 0{
+        putInCache(conf.REDIS_CONN, hash, j, conf.CACHE_EXPIRE)
+    }
 
     return j
 
@@ -728,7 +741,9 @@ func getGeosByLevSlug(conf CONFIG, levslug string, filter_key string) []byte {
     data["objects"] = &results
     j, err := json.Marshal(data)
 
-    putInCache(conf.REDIS_CONN, hash, j, conf.CACHE_EXPIRE)
+    if len(results) != 0{
+        putInCache(conf.REDIS_CONN, hash, j, conf.CACHE_EXPIRE)
+    }
 
     return j
 }
