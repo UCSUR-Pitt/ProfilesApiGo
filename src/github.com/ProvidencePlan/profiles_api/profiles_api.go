@@ -142,9 +142,12 @@ func getData(ind string, time string, raw_geos string, conf CONFIG) []byte {
         number sql.NullFloat64
         percent sql.NullFloat64
         moe sql.NullFloat64
+        numerator sql.NullFloat64
         f_number sql.NullString
         f_percent sql.NullString
         f_moe sql.NullString
+        f_numerator sql.NullString
+
     )
 
     /* SANITIZING INPUTS */
@@ -170,7 +173,7 @@ func getData(ind string, time string, raw_geos string, conf CONFIG) []byte {
 	}
     defer db.Close()
 
-    var base_query string = "SELECT indicator_slug, display_title, geography_id, geography_name, geometry_id, value_type, time_key, number, percent, moe, f_number, f_percent, f_moe FROM profiles_flatvalue WHERE indicator_slug = $1 AND time_key= $2"
+    var base_query string = "SELECT indicator_slug, display_title, geography_id, geography_name, geometry_id, value_type, time_key, number, percent, moe, numerator, f_number, f_percent, f_moe, f_numerator FROM profiles_flatvalue WHERE indicator_slug = $1 AND time_key= $2"
     var query string
 
     // we need to support getting * geos or specific ones via thier ids
@@ -198,7 +201,7 @@ func getData(ind string, time string, raw_geos string, conf CONFIG) []byte {
 
     for rows.Next() {
         jrow := make(map[string]interface{})
-        err := rows.Scan(&indicator_slug, &display_title, &geography_id, &geography_name, &geometry_id, &value_type, &time_key, &number, &percent, &moe, &f_number, &f_percent, &f_moe)
+        err := rows.Scan(&indicator_slug, &display_title, &geography_id, &geography_name, &geometry_id, &value_type, &time_key, &number, &percent, &moe, &numerator, &f_number, &f_percent, &f_moe, &f_numerator)
         if err != nil {
             log.Fatal(err)
         }
@@ -227,7 +230,6 @@ func getData(ind string, time string, raw_geos string, conf CONFIG) []byte {
         }else{
             jrow["moe"] = nil
         }
-
         if f_number.Valid{
             jrow["f_number"] = f_number.String
 
@@ -235,12 +237,23 @@ func getData(ind string, time string, raw_geos string, conf CONFIG) []byte {
             jrow["f_number"] = nil
         }
         if value_type != "i"{
+            if numerator.Valid{
+                jrow["numerator"] = numerator.Float64
+            }else{
+                jrow["numerator"] = nil
+            }
+            if f_numerator.Valid{
+                jrow["f_numerator"] = f_numerator.String
+            }else{
+                jrow["f_numerator"] = nil
+            }
             if f_percent.Valid{
                 jrow["f_percent"] = f_percent.String
 
             }else{
                 jrow["f_percent"] = nil
             }
+
         }else{
             jrow["f_percent"] = nil
         }
