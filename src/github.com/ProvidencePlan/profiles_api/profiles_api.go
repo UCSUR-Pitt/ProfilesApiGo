@@ -143,10 +143,12 @@ func getData(ind string, time string, raw_geos string, conf CONFIG) []byte {
         percent sql.NullFloat64
         moe sql.NullFloat64
         numerator sql.NullFloat64
+        numerator_moe sql.NullFloat64
         f_number sql.NullString
         f_percent sql.NullString
         f_moe sql.NullString
         f_numerator sql.NullString
+        f_numerator_moe sql.NullString
 
     )
 
@@ -173,7 +175,7 @@ func getData(ind string, time string, raw_geos string, conf CONFIG) []byte {
 	}
     defer db.Close()
 
-    var base_query string = "SELECT indicator_slug, display_title, geography_id, geography_name, geometry_id, value_type, time_key, number, percent, moe, numerator, f_number, f_percent, f_moe, f_numerator FROM profiles_flatvalue WHERE indicator_slug = $1 AND time_key= $2"
+    var base_query string = "SELECT indicator_slug, display_title, geography_id, geography_name, geometry_id, value_type, time_key, number, percent, moe, numerator,numerator_moe, f_number, f_percent, f_moe, f_numerator, f_numerator_moe FROM profiles_flatvalue WHERE indicator_slug = $1 AND time_key= $2"
     var query string
 
     // we need to support getting * geos or specific ones via thier ids
@@ -201,7 +203,7 @@ func getData(ind string, time string, raw_geos string, conf CONFIG) []byte {
 
     for rows.Next() {
         jrow := make(map[string]interface{})
-        err := rows.Scan(&indicator_slug, &display_title, &geography_id, &geography_name, &geometry_id, &value_type, &time_key, &number, &percent, &moe, &numerator, &f_number, &f_percent, &f_moe, &f_numerator)
+        err := rows.Scan(&indicator_slug, &display_title, &geography_id, &geography_name, &geometry_id, &value_type, &time_key, &number, &percent, &moe, &numerator, &numerator_moe, &f_number, &f_percent, &f_moe, &f_numerator, &f_numerator_moe)
         if err != nil {
             log.Fatal(err)
         }
@@ -246,6 +248,16 @@ func getData(ind string, time string, raw_geos string, conf CONFIG) []byte {
                 jrow["f_numerator"] = f_numerator.String
             }else{
                 jrow["f_numerator"] = nil
+            }
+            if numerator.Valid{
+                jrow["numerator_moe"] = numerator.Float64
+            }else{
+                jrow["numerator_moe"] = nil
+            }
+            if f_numerator.Valid{
+                jrow["f_numerator_moe"] = f_numerator.String
+            }else{
+                jrow["f_numerator_moe"] = nil
             }
             if f_percent.Valid{
                 jrow["f_percent"] = f_percent.String
@@ -300,10 +312,12 @@ func getDataGeoJson(ind string, time string, raw_geos string, conf CONFIG) []byt
         percent sql.NullFloat64
         moe sql.NullFloat64
         numerator sql.NullFloat64
+        numerator_moe sql.NullFloat64
         f_number sql.NullString
         f_percent sql.NullString
         f_moe sql.NullString
         f_numerator sql.NullString
+        f_numerator_moe sql.NullString
         geom sql.NullString
 
     )
@@ -331,7 +345,7 @@ func getDataGeoJson(ind string, time string, raw_geos string, conf CONFIG) []byt
         return r
 	}
     defer db.Close()
-    var base_query = "SELECT profiles_flatvalue.indicator_slug, profiles_flatvalue.display_title, profiles_flatvalue.geography_id, profiles_flatvalue.geography_name, profiles_flatvalue.geometry_id, profiles_flatvalue.value_type, profiles_flatvalue.time_key, profiles_flatvalue.number, profiles_flatvalue.percent, profiles_flatvalue.moe, profiles_flatvalue.numerator, profiles_flatvalue.f_number, profiles_flatvalue.f_percent, profiles_flatvalue.f_moe, profiles_flatvalue.f_numerator, ST_AsGeoJSON(maps_polygonmapfeature.geom) AS geom FROM profiles_flatvalue LEFT OUTER JOIN maps_polygonmapfeature ON (profiles_flatvalue.geography_geo_key = maps_polygonmapfeature.geo_key) WHERE profiles_flatvalue.indicator_slug = $1 AND profiles_flatvalue.time_key= $2"
+    var base_query = "SELECT profiles_flatvalue.indicator_slug, profiles_flatvalue.display_title, profiles_flatvalue.geography_id, profiles_flatvalue.geography_name, profiles_flatvalue.geometry_id, profiles_flatvalue.value_type, profiles_flatvalue.time_key, profiles_flatvalue.number, profiles_flatvalue.percent, profiles_flatvalue.moe, profiles_flatvalue.numerator, profiles_flatvalue.numerator_moe, profiles_flatvalue.f_number, profiles_flatvalue.f_percent, profiles_flatvalue.f_moe, profiles_flatvalue.f_numerator, profiles_flatvalue.f_numerator_moe, ST_AsGeoJSON(maps_polygonmapfeature.geom) AS geom FROM profiles_flatvalue LEFT OUTER JOIN maps_polygonmapfeature ON (profiles_flatvalue.geography_geo_key = maps_polygonmapfeature.geo_key) WHERE profiles_flatvalue.indicator_slug = $1 AND profiles_flatvalue.time_key= $2"
 
     var query string 
 
@@ -364,7 +378,7 @@ func getDataGeoJson(ind string, time string, raw_geos string, conf CONFIG) []byt
 
     for rows.Next() {
         jrow := make(map[string]interface{})
-        err := rows.Scan(&indicator_slug, &display_title, &geography_id, &geography_name, &geometry_id, &value_type, &time_key, &number, &percent, &moe, &numerator, &f_number, &f_percent, &f_moe, &f_numerator, &geom)
+        err := rows.Scan(&indicator_slug, &display_title, &geography_id, &geography_name, &geometry_id, &value_type, &time_key, &number, &percent, &moe, &numerator, &numerator_moe, &f_number, &f_percent, &f_moe, &f_numerator, &f_numerator_moe, &geom)
         if err == nil {
             if geom.Valid{
                 jrow = jsonLoads(geom.String)
@@ -415,6 +429,16 @@ func getDataGeoJson(ind string, time string, raw_geos string, conf CONFIG) []byt
                     values["f_numerator"] = f_numerator.String
                 }else{
                     values["f_numerator"] = nil
+                }
+                if numerator_moe.Valid{
+                    values["numerator_moe"] = numerator_moe.Float64
+                }else{
+                    values["numerator_moe"] = nil
+                }
+                if f_numerator.Valid{
+                    values["f_numerator_moe"] = f_numerator_moe.String
+                }else{
+                    values["f_numerator_moe"] = nil
                 }
                 if f_percent.Valid{
                     values["f_percent"] = f_percent.String
