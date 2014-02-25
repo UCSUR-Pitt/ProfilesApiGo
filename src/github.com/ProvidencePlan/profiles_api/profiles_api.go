@@ -6,6 +6,7 @@
     * Add Way list indicator slugs
     * Need to support Multiple Times
     * Query error should return proper exit code
+    * STANDARDIZE Using query results. This is not DRY at ALL!
 
     URL Examples:
     indicator data
@@ -40,6 +41,7 @@ import (
     "net/http"
     "strconv"
     "encoding/json"
+    "encoding/csv"
     "regexp"
     "errors"
     "io/ioutil"
@@ -290,6 +292,117 @@ func getData(ind string, time string, raw_geos string, conf CONFIG) []byte {
     return j
 }
 
+
+// Write csv formated data to w
+// inds is string of indicator ids, raw_goes is a string of geo_ids
+// We validate them first and return an error if anything happens
+func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CONFIG) {
+    //hash := cache.MakeHash("gdgj:" + ind + time + raw_geos)
+    //c := getFromCache(conf.REDIS_CONN, hash)
+    //if len(c) != 0{
+    //    log.Println("Serving getData from cache gdgj: ", ind + time + raw_geos)
+    //    return c
+    //}
+    
+    var (
+        display_title string
+        geography_name string
+        time_key string
+        number sql.NullFloat64
+        percent sql.NullFloat64
+        moe sql.NullFloat64
+        f_number sql.NullString
+        f_percent sql.NullString
+        f_moe sql.NullString
+        vNumber string
+        vPercent string
+        vMoe string
+    )
+    
+
+    /* SANITIZING INPUTS */
+    cleaned_geos, err := sanitize(raw_geos, "[0-9,]+")
+    if err != nil{
+        http.Error(res, "", 500)
+        return
+    }
+
+    cleaned_inds, err := sanitize(inds, "[0-9,]+")
+    if err != nil{
+        http.Error(res, "", 500)
+        return
+    }
+
+    // Now we need to decide whether or not we want to give the user a single indicator 
+    // or a single geography with many indicators
+    splitInds := strings.Split(cleaned_inds, ",")
+    splitGeos := strings.Split(cleaned_geos, ",")
+
+    if len(splitInds) == 1 {
+        // Geos can be N
+    }else if len(splitInds)>1 {
+        cleaned_geos = splitGeos[0]
+    }
+
+    db, err := getDB(config)
+	if err != nil {
+		log.Println("Error trying to call getDB--GetCSV")
+        http.Error(res, "", 500)
+        return
+	}
+    defer db.Close()
+
+    query := "SELECT display_title, geography_name, time_key, number, percent, moe, f_number, f_percent, f_moe FROM profiles_flatvalue WHERE indicator_id IN (%v) AND geography_id IN(%v) AND time_key != 'change'"
+    query = fmt.Sprintf(query, cleaned_inds, cleaned_geos)
+
+    stmt, err := db.Prepare(query)
+    if err != nil {
+        log.Println("Error Preparing query: getCSV")
+        http.Error(res, "", 500)
+        return
+
+    }
+    defer stmt.Close()
+
+    rows, err := stmt.Query()
+    if err != nil {
+        log.Fatal(err)
+    }
+    csvWriter := csv.NewWriter(res) 
+    //Write the header
+    header := []string{"indicator", "geography", "time", "number", "percent", "moe"}
+    
+    csvWriter.Write(header)
+    csvWriter.Flush()
+    for rows.Next() {
+        err := rows.Scan(&display_title, &geography_name, &time_key, &number, &percent, &moe, &f_number, &f_percent, &f_moe)
+        if !number.Valid{
+            vNumber = ""
+        }else{
+            vNumber = f_number.String
+        }
+        if !percent.Valid{
+            vPercent = ""
+        }else{
+            vPercent = f_percent.String
+        }
+
+        if !moe.Valid{
+            vMoe = ""
+        }else{
+            vMoe = f_moe.String
+        }
+
+        if err == nil {
+             csvWriter.Write([]string{display_title, geography_name, time_key, vNumber, vPercent, vMoe})
+             csvWriter.Flush()
+        }
+
+    }
+
+}
+
+
 func getDataGeoJson(ind string, time string, raw_geos string, conf CONFIG) []byte {
     // Join indicator data with shapefiles geoms
     hash := cache.MakeHash("gdgj:" + ind + time + raw_geos)
@@ -368,7 +481,9 @@ func getDataGeoJson(ind string, time string, raw_geos string, conf CONFIG) []byt
 
     rows, err := stmt.Query(ind, cleaned_time)
     if err != nil {
-        log.Fatal(err)
+        log.Println("Error runnning query: getDataGeoJson")
+        r:=[]byte("500")
+        return r
     }
 
     results := []interface{}{}
@@ -666,11 +781,11 @@ func getGeoQuery(conf CONFIG, geoms_ids string, geo_lev_id string, query_type st
 
     if cleaned_query_type == "IN" {
         // find geoms contained in this geom
-        geom_query = "WITH targ_levs AS (SELECT maps_polygonmapfeature.id as geom_id, maps_polygonmapfeature.geo_key, maps_polygonmapfeature.geom, profiles_georecord.id as id, profiles_georecord.slug, profiles_georecord.name as label FROM maps_polygonmapfeature, profiles_georecord"+ where_clause+ "maps_polygonmapfeature.geo_key=profiles_georecord.geo_id), targ_geom AS (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geoms + ") LIMIT 1) SELECT targ_levs.id, targ_levs.geom_id, targ_levs.geo_key, targ_levs.label, targ_levs.slug FROM targ_levs, targ_geom WHERE ST_Contains(targ_geom.geom, ST_Centroid(targ_levs.geom))"
+        geom_query = "WITH targ_levs AS (SELECT maps_polygonmapfeature.id as geom_id, maps_polygonmapfeature.geo_key, maps_polygonmapfeature.geom, profiles_georecord.id as id, profiles_georecord.slug, profiles_georecord.name as label FROM maps_polygonmapfeature, profiles_georecord"+ where_clause+ "maps_polygonmapfeature.geo_key=profiles_georecord.geo_id), targ_geom AS (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geoms + ") LIMIT 1) SELECT DISTINCT ON (targ_levs.geo_key) targ_levs.id, targ_levs.geom_id, targ_levs.geo_key, targ_levs.label, targ_levs.slug FROM targ_levs, targ_geom WHERE ST_Contains(targ_geom.geom, ST_Centroid(targ_levs.geom)) ORDER BY targ_levs.geo_key"
 
     }else if cleaned_query_type == "OF"{
         // find geoms that contain geom
-        geom_query = "WITH levs AS (SELECT maps_polygonmapfeature.id as geom_id, maps_polygonmapfeature.geo_key, maps_polygonmapfeature.geom, profiles_georecord.id as id, profiles_georecord.slug, profiles_georecord.name as label FROM maps_polygonmapfeature, profiles_georecord"+ where_clause +"maps_polygonmapfeature.geo_key=profiles_georecord.geo_id), targ AS (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geoms + ") LIMIT 1) SELECT levs.id, levs.geom_id, levs.geo_key, levs.label, levs.slug FROM levs, targ WHERE ST_Contains(levs.geom, ST_Centroid(targ.geom))"
+        geom_query = "WITH levs AS (SELECT maps_polygonmapfeature.id as geom_id, maps_polygonmapfeature.geo_key, maps_polygonmapfeature.geom, profiles_georecord.id as id, profiles_georecord.slug, profiles_georecord.name as label FROM maps_polygonmapfeature, profiles_georecord"+ where_clause +"maps_polygonmapfeature.geo_key=profiles_georecord.geo_id), targ AS (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geoms + ") LIMIT 1) SELECT DISTINCT ON (levs.geo_key) levs.id, levs.geom_id, levs.geo_key, levs.label, levs.slug FROM levs, targ WHERE ST_Contains(levs.geom, ST_Centroid(targ.geom)) ORDER BY levs.geo_key"
 
     }
     //TODO: We tend to always run querires like this, why not abstract it
@@ -893,7 +1008,16 @@ func main() {
     settings_port := args[2]
     log.Printf("Starting Server on %s", settings_port)
     conf := getConf(settings_path)
+
     m:= martini.Classic()
+
+    m.Get("/csv/", func(res http.ResponseWriter, req *http.Request) {
+        inds := req.FormValue("i")
+        geos := req.FormValue("g")
+        getDataCSV(res, inds, geos, conf)
+        
+    })
+
     m.Get("/indicator/:slug", func(res http.ResponseWriter, req *http.Request, params martini.Params) (int, string) {
         res.Header().Set("Content-Type", "application/json")
         res.Header().Set("Access-Control-Allow-Origin", "*")
@@ -978,7 +1102,6 @@ func main() {
 
 
     });
-
 
     http.ListenAndServe(settings_port, m)
 }
