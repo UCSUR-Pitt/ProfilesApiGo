@@ -397,9 +397,7 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
              csvWriter.Write([]string{display_title, geography_name, time_key, vNumber, vPercent, vMoe})
              csvWriter.Flush()
         }
-
     }
-
 }
 
 
@@ -1012,10 +1010,11 @@ func main() {
     m:= martini.Classic()
 
     m.Get("/csv/", func(res http.ResponseWriter, req *http.Request) {
+        res.Header().Set("Content-Disposition", "attachment;filename=profilesdata.csv")
+        res.Header().Set("Access-Control-Allow-Origin", "*")
         inds := req.FormValue("i")
         geos := req.FormValue("g")
-        getDataCSV(res, inds, geos, conf)
-        
+        getDataCSV(res, inds, geos, conf) // the response codes and data are written in the handler func
     })
 
     m.Get("/indicator/:slug", func(res http.ResponseWriter, req *http.Request, params martini.Params) (int, string) {
