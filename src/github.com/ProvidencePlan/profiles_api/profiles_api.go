@@ -307,6 +307,7 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
     var (
         display_title string
         geography_name string
+        geography_geokey string
         time_key string
         number sql.NullFloat64
         percent sql.NullFloat64
@@ -352,7 +353,7 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 	}
     defer db.Close()
 
-    query := "SELECT display_title, geography_name, time_key, number, percent, moe, f_number, f_percent, f_moe FROM profiles_flatvalue WHERE indicator_id IN (%v) AND geography_id IN(%v) AND time_key != 'change'"
+    query := "SELECT display_title, geography_name, geography_geo_key, time_key, number, percent, moe, f_number, f_percent, f_moe FROM profiles_flatvalue WHERE indicator_id IN (%v) AND geography_id IN(%v) AND time_key != 'change'"
     query = fmt.Sprintf(query, cleaned_inds, cleaned_geos)
 
     stmt, err := db.Prepare(query)
@@ -370,12 +371,12 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
     }
     csvWriter := csv.NewWriter(res) 
     //Write the header
-    header := []string{"indicator", "geography", "time", "number", "percent", "moe"}
+    header := []string{"indicator", "geography", "geo_id", "time", "number", "percent", "moe"}
     
     csvWriter.Write(header)
     csvWriter.Flush()
     for rows.Next() {
-        err := rows.Scan(&display_title, &geography_name, &time_key, &number, &percent, &moe, &f_number, &f_percent, &f_moe)
+        err := rows.Scan(&display_title, &geography_name, &geography_geokey, &time_key, &number, &percent, &moe, &f_number, &f_percent, &f_moe)
         if !number.Valid{
             vNumber = ""
         }else{
@@ -394,7 +395,7 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
         }
 
         if err == nil {
-             csvWriter.Write([]string{display_title, geography_name, time_key, vNumber, vPercent, vMoe})
+             csvWriter.Write([]string{display_title, geography_name, geography_geokey, time_key, vNumber, vPercent, vMoe})
              csvWriter.Flush()
         }
     }
