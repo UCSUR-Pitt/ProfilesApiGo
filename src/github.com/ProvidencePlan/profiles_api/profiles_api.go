@@ -1040,7 +1040,9 @@ func getDB(conf CONFIG) (*sql.DB, error) {
 		conf.DB_USER, conf.DB_NAME, conf.DB_HOST, conf.DB_PORT, conf.DB_PASS)
 	db, err := sql.Open("postgres", conn_str)
 	err = db.Ping()
-    log.Print(err)
+    if err != nil{
+        log.Print(err, conn_str)
+    }
 	return db, err
 }
 
