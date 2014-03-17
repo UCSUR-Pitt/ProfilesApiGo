@@ -41,7 +41,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	//"encoding/csv"
+	"encoding/csv"
 	"errors"
 	"github.com/ProvidencePlan/profiles_api/cache"
 	"io/ioutil"
@@ -310,34 +310,30 @@ func (f *FlatValue) ToMap() map[string]string {
 	m := map[string]string{}
 
 	if !f.Number.Valid {
-		m["number"] = ""
+		m["number"] = "n/a"
 	} else {
 		m["number"] = f.F_number.String
 	}
 	if !f.Percent.Valid {
-		m["percent"] = ""
+		m["percent"] = "n/a"
 	} else {
 		m["percent"] = f.F_percent.String
 	}
 
 	if !f.Moe.Valid {
-		m["moe"] = ""
+		m["moe"] = "n/a"
 	} else {
-		m["moe"] = f.F_moe.String
+		m["moe"] = fmt.Sprintf("%v", f.Moe.Float64)
 	}
-
-	m["display_title"] = f.Display_title
-	m["time_key"] = f.Time_key
-	m["geography_name"] = f.Geography_name
 
 	return m
 }
 
 func toSlice(f FlatValue) []string { // TODO: why cant I make this part of the struct. Error is: Cannot call pointer method on val. 
     s := []string{}
-    for _, val := range(f.ToMap()) {
-        s = append(s, val)
-    }
+    fM := f.ToMap()
+    // append fields in order, we cant simply loop over the keys.
+    s = append(s, []string{fM["number"], fM["moe"], fM["percent"]}...) 
     return s
 }
 
@@ -381,10 +377,7 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 
 	var time string
 	var timeSet []string
-	var flatValues = make(map[string]map[string]FlatValue) // {indid: {time1:, time2: time:3}}
-
-   // baseHeaders := []string{"indicator", "group", "geo", "geo_id"}
-   // baseDataHeaders := []string{"est", "moe", "pct", "pct_moe"} // each time should get a set of these
+    var flatValues = make(map[string]map[string]map[string]FlatValue) // {indid:{geoid:{time1, time2}}}
 
 	// FETCH the Distinct Times in our Dataset
 	timesQ := "SELECT DISTINCT time_key FROM profiles_flatvalue WHERE indicator_id IN (%v) AND geography_id IN(%v) AND time_key != 'change'"
@@ -425,36 +418,55 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 		err := rows.Scan(&v.Display_title, &v.Geography_name, &v.Geography_geokey, &v.Time_key, &v.Number, &v.Percent, &v.Moe, &v.F_number, &v.F_percent, &v.F_moe)
 
 		if err == nil {
-			//fmt.Println(v.ToMap())
-			// add a new key to our map for each indicator if it doesnt exist and then populate it with all our time posibilities
+			// add a new key to our map for each indicator if it doesnt exists
 			_, exists := flatValues[v.Display_title]
-			if !exists {
 
-				flatValues[v.Display_title] = make(map[string]FlatValue)
+			if !exists {
+                //-------------------------------------geoid: {timekey: FV}-----------------------------------//
+				flatValues[v.Display_title] = make(map[string]map[string]FlatValue)
+
+                // Now we add the geography key 
+                _, exists := flatValues[v.Display_title][v.Geography_geokey]
+                if !exists{
+                    // it doesnt exist so we are gonna create a key for the new geokey
+				    flatValues[v.Display_title][v.Geography_geokey] = make(map[string]FlatValue)
+                }
+
+                // now add placeholders for all the times.
 				for _, t := range timeSet {
-					flatValues[v.Display_title][t] = FlatValue{Time_key: t}
+                    flatValues[v.Display_title][v.Geography_geokey][t] = FlatValue{Display_title: v.Display_title, Time_key: t}
 				}
 			}
 
-			// Now actually store values as they come
-			flatValues[v.Display_title][v.Time_key] = v
+            // actually store the data
+            flatValues[v.Display_title][v.Geography_geokey][v.Time_key] = v
 		}
-
 	}
+
+    csvWriter := csv.NewWriter(res)
+    header := []string{"indicator", "geography_id"}
+    // generate a header
+    for _, tVal := range timeSet {
+        header = append(header, []string{tVal + "_est", tVal + "_moe", tVal + "_pct"}...)
+    }
+
+    csvWriter.Write(header)
+    csvWriter.Flush()
 
 	// at this point our values are prepped for export
-    for _, val := range flatValues { // key: Indicicator Name, val: map of times with vals
-        csvRow :=[]string{}
-        for _, t := range(timeSet){ // t : time_key. Now we are starting to form our csv rows. Which should all contain base Headrs
-            //print(val[t]) // val[t] is a FlatValue struct
-            //TODO:NEED TO SORT DATA ROWS!
-            csvRow = append(csvRow, toSlice(val[t])...)
+    for indKey, val := range flatValues { 
+        csvRow := []string{indKey}
+        // now iterate Geos
+        for geoId, indGeo := range val {
+            // now iterate time vals
+            csvRow = append(csvRow, geoId)
+            for _, timeVal := range indGeo{
+                csvRow = append(csvRow, toSlice(timeVal)...)
+            }
         }
-
-        print(csvRow)
+        csvWriter.Write(csvRow)
+        csvWriter.Flush()
 	}
-
-
 
 }
 
