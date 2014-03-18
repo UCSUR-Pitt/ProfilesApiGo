@@ -32,21 +32,21 @@ package main
 
 import (
 	"database/sql"
+	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/ProvidencePlan/profiles_api/cache"
 	"github.com/codegangsta/martini"
 	_ "github.com/lib/pq"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
-	"encoding/csv"
-	"errors"
-	"github.com/ProvidencePlan/profiles_api/cache"
-	"io/ioutil"
-	"regexp"
-    "sort"
 )
 
 type CONFIG struct {
@@ -297,6 +297,7 @@ type FlatValue struct {
 	Geography_name   string
 	Geography_geokey string
 	Time_key         string
+    Value_type       string
 	Number           sql.NullFloat64
 	Percent          sql.NullFloat64
 	Moe              sql.NullFloat64
@@ -317,26 +318,40 @@ func (f *FlatValue) ToMap() map[string]string {
 	if !f.Percent.Valid {
 		m["percent"] = "n/a"
 	} else {
-		m["percent"] = f.F_percent.String
+        if f.F_percent.String == "0.0%"{
+		    m["percent"] = "n/a"
+        }else{
+		    m["percent"] = f.F_percent.String
+        }
 	}
 
 	if !f.Moe.Valid {
 		m["moe"] = "n/a"
+        m["pct_moe"] = "n/a"
 	} else {
-		m["moe"] = fmt.Sprintf("%v", f.Moe.Float64)
+        if f.Value_type != "i"{
+            // this is a denominator and we moe should be a percentage.
+            m["moe"] = "n/a"
+            m["pct_moe"] = fmt.Sprintf("%v%%", f.Moe.Float64*100)
+            // we need to n/a estimates
+            m["number"] = "n/a"
+        }else{
+            // regular indicator moe
+		    m["moe"] = fmt.Sprintf("%v", f.Moe.Float64)
+            m["pct_moe"] = "n/a"
+        }
 	}
 
 	return m
 }
 
-func toSlice(f FlatValue) []string { // TODO: why cant I make this part of the struct. Error is: Cannot call pointer method on val. 
-    s := []string{}
-    fM := f.ToMap()
-    // append fields in order, we cant simply loop over the keys.
-    s = append(s, []string{fM["number"], fM["moe"], fM["percent"]}...) 
-    return s
+func toSlice(f FlatValue) []string { // TODO: why cant I make this part of the struct. Error is: Cannot call pointer method on val.
+	s := []string{}
+	fM := f.ToMap()
+	// append fields in order, we cant simply loop over the keys.
+	s = append(s, []string{fM["number"], fM["moe"], fM["percent"], fM["pct_moe"]}...)
+	return s
 }
-
 
 // Write csv formated data to w
 // inds is string of indicator ids, raw_goes is a string of geo_ids
@@ -355,6 +370,7 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 		http.Error(res, "", 500)
 		return
 	}
+
 
 	// Now we need to decide whether or not we want to give the user a single indicator
 	// or a single geography with many indicators
@@ -377,7 +393,8 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 
 	var time string
 	var timeSet []string
-    var flatValues = make(map[string]map[string]map[string]FlatValue) // {indid:{geoid:{time1, time2}}}
+	var flatValues = make(map[string]map[string]map[string]FlatValue) // {indid:{geoid:{time1, time2}}}
+    
 
 	// FETCH the Distinct Times in our Dataset
 	timesQ := "SELECT DISTINCT time_key FROM profiles_flatvalue WHERE indicator_id IN (%v) AND geography_id IN(%v) AND time_key != 'change'"
@@ -393,9 +410,9 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 		}
 		timeSet = append(timeSet, time)
 	}
-    sort.Strings(timeSet)
+	sort.Strings(timeSet)
 	// Now Fetch the Data
-	query := "SELECT display_title, geography_name, geography_geo_key, time_key, number, percent, moe, f_number, f_percent, f_moe FROM profiles_flatvalue WHERE indicator_id IN (%v) AND geography_id IN(%v) AND time_key != 'change' ORDER BY indicator_id"
+	query := "SELECT display_title, geography_name, geography_geo_key, time_key, value_type, number, percent, moe, f_number, f_percent, f_moe FROM profiles_flatvalue WHERE indicator_id IN (%v) AND geography_id IN(%v) AND time_key != 'change' ORDER BY indicator_id"
 
 	query = fmt.Sprintf(query, cleaned_inds, cleaned_geos)
 
@@ -412,60 +429,67 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 	if err != nil {
 		log.Fatal(err)
 	}
+    // TODO: This is a HACK. Create a geo names map as we go
+    geoIdsToNames := map[string]string{}
 
 	for rows.Next() {
 		v := FlatValue{}
-		err := rows.Scan(&v.Display_title, &v.Geography_name, &v.Geography_geokey, &v.Time_key, &v.Number, &v.Percent, &v.Moe, &v.F_number, &v.F_percent, &v.F_moe)
+		err := rows.Scan(&v.Display_title, &v.Geography_name, &v.Geography_geokey, &v.Time_key, &v.Value_type, &v.Number, &v.Percent, &v.Moe, &v.F_number, &v.F_percent, &v.F_moe)
 
 		if err == nil {
+            
+            // collect the the geokey and name 
+            geoIdsToNames[v.Geography_geokey] = v.Geography_name
+           
+            
 			// add a new key to our map for each indicator if it doesnt exists
 			_, exists := flatValues[v.Display_title]
 
 			if !exists {
-                //-------------------------------------geoid: {timekey: FV}-----------------------------------//
+				//-------------------------------------geoid: {timekey: FV}-----------------------------------//
 				flatValues[v.Display_title] = make(map[string]map[string]FlatValue)
 
-                // Now we add the geography key 
-                _, exists := flatValues[v.Display_title][v.Geography_geokey]
-                if !exists{
-                    // it doesnt exist so we are gonna create a key for the new geokey
-				    flatValues[v.Display_title][v.Geography_geokey] = make(map[string]FlatValue)
-                }
-
-                // now add placeholders for all the times.
-				for _, t := range timeSet {
-                    flatValues[v.Display_title][v.Geography_geokey][t] = FlatValue{Display_title: v.Display_title, Time_key: t}
-				}
 			}
+            // Now we add the geography key
+            _, exists = flatValues[v.Display_title][v.Geography_geokey]
 
-            // actually store the data
-            flatValues[v.Display_title][v.Geography_geokey][v.Time_key] = v
+            if !exists {
+                // it doesnt exist so we are gonna create a key for the new geokey
+                flatValues[v.Display_title][v.Geography_geokey] = make(map[string]FlatValue)
+                // now add placeholders for all the times.
+                for _, t := range timeSet {
+                    flatValues[v.Display_title][v.Geography_geokey][t] = FlatValue{Display_title: v.Display_title, Time_key: t}
+                }
+            }
+
+			// actually store the data
+			flatValues[v.Display_title][v.Geography_geokey][v.Time_key] = v
 		}
 	}
 
-    csvWriter := csv.NewWriter(res)
-    header := []string{"indicator", "geography_id"}
-    // generate a header
-    for _, tVal := range timeSet {
-        header = append(header, []string{tVal + "_est", tVal + "_moe", tVal + "_pct"}...)
-    }
+	csvWriter := csv.NewWriter(res)
+	header := []string{"indicator", "geography_name", "geography_id"}
+	// generate a header
+	for _, tVal := range timeSet {
+		header = append(header, []string{tVal + "_est", tVal + "_moe", tVal + "_pct", tVal + "_pct_moe"}...)
+	}
 
-    csvWriter.Write(header)
-    csvWriter.Flush()
+	csvWriter.Write(header)
+	csvWriter.Flush()
 
 	// at this point our values are prepped for export
-    for indKey, val := range flatValues { 
-        csvRow := []string{indKey}
-        // now iterate Geos
-        for geoId, indGeo := range val {
-            // now iterate time vals
-            csvRow = append(csvRow, geoId)
-            for _, timeVal := range indGeo{
-                csvRow = append(csvRow, toSlice(timeVal)...)
-            }
-        }
-        csvWriter.Write(csvRow)
-        csvWriter.Flush()
+	for indKey, val := range flatValues {
+		// now iterate Geos
+		for geoId, indGeo := range val {
+		    csvRow := []string{indKey}
+			// now iterate time vals
+			csvRow = append(csvRow, []string{geoIdsToNames[geoId], geoId}...)
+			for _, timeVal := range indGeo {
+				csvRow = append(csvRow, toSlice(timeVal)...)
+			}
+            csvWriter.Write(csvRow)
+            csvWriter.Flush()
+		}
 	}
 
 }
@@ -1052,9 +1076,9 @@ func getDB(conf CONFIG) (*sql.DB, error) {
 		conf.DB_USER, conf.DB_NAME, conf.DB_HOST, conf.DB_PORT, conf.DB_PASS)
 	db, err := sql.Open("postgres", conn_str)
 	err = db.Ping()
-    if err != nil{
-        log.Print(err, conn_str)
-    }
+	if err != nil {
+		log.Print(err, conn_str)
+	}
 	return db, err
 }
 
@@ -1074,11 +1098,18 @@ func main() {
 
 	m := martini.Classic()
 
-	m.Get("/csv/", func(res http.ResponseWriter, req *http.Request) {
-		res.Header().Set("Content-Disposition", "attachment;filename=profilesdata.csv")
-		res.Header().Set("Access-Control-Allow-Origin", "*")
+	m.Get("/csv/", func(res http.ResponseWriter, req *http.Request){
+        //TODO: Why does this respose comeback as "Canceled"
 		inds := req.FormValue("i")
 		geos := req.FormValue("g")
+        domain_name := req.FormValue("dom")
+        if(domain_name == ""){
+            domain_name ="profiles"
+        }
+
+		res.Header().Set("Content-Disposition", fmt.Sprintf("attachment;filename=%s.csv", domain_name))
+		res.Header().Set("Access-Control-Allow-Origin", "*")
+        res.Header().Set("Status","200")
 		getDataCSV(res, inds, geos, conf) // the response codes and data are written in the handler func
 	})
 
