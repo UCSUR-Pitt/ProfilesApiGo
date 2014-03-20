@@ -311,23 +311,28 @@ func (f *FlatValue) ToMap() map[string]string {
 	m := map[string]string{}
 
 	if !f.Number.Valid {
-		m["number"] = "n/a"
+		m["number"] = ""
 	} else {
-		m["number"] = f.F_number.String
+        if f.Value_type == "i"{
+		    m["number"] = f.F_number.String
+        }else{
+
+		    m["number"] = "n/a"
+        }
 	}
 	if !f.Percent.Valid {
-		m["percent"] = "n/a"
+		m["percent"] = ""
 	} else {
         if f.F_percent.String == "0.0%"{
-		    m["percent"] = "n/a"
+		    m["percent"] = ""
         }else{
 		    m["percent"] = f.F_percent.String
         }
 	}
 
 	if !f.Moe.Valid {
-		m["moe"] = "n/a"
-        m["pct_moe"] = "n/a"
+		m["moe"] = ""
+        m["pct_moe"] = ""
 	} else {
         if f.Value_type != "i"{
             // this is a denominator and we moe should be a percentage.
@@ -394,7 +399,7 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 	var time string
 	var timeSet []string
 	var flatValues = make(map[string]map[string]map[string]FlatValue) // {indid:{geoid:{time1, time2}}}
-    
+    var flatValKeys = []string{}
 
 	// FETCH the Distinct Times in our Dataset
 	timesQ := "SELECT DISTINCT time_key FROM profiles_flatvalue WHERE indicator_id IN (%v) AND geography_id IN(%v) AND time_key != 'change'"
@@ -412,7 +417,7 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 	}
 	sort.Strings(timeSet)
 	// Now Fetch the Data
-	query := "SELECT display_title, geography_name, geography_geo_key, time_key, value_type, number, percent, moe, f_number, f_percent, f_moe FROM profiles_flatvalue WHERE indicator_id IN (%v) AND geography_id IN(%v) AND time_key != 'change' ORDER BY indicator_id"
+	query := "SELECT display_title, geography_name, geography_geo_key, time_key, value_type, number, percent, moe, f_number, f_percent, f_moe FROM profiles_flatvalue WHERE indicator_id IN (%v) AND geography_id IN(%v) AND time_key != 'change' ORDER BY display_title, geography_name ASC"
 
 	query = fmt.Sprintf(query, cleaned_inds, cleaned_geos)
 
@@ -437,17 +442,16 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 		err := rows.Scan(&v.Display_title, &v.Geography_name, &v.Geography_geokey, &v.Time_key, &v.Value_type, &v.Number, &v.Percent, &v.Moe, &v.F_number, &v.F_percent, &v.F_moe)
 
 		if err == nil {
-            
             // collect the the geokey and name 
             geoIdsToNames[v.Geography_geokey] = v.Geography_name
-           
-            
+
 			// add a new key to our map for each indicator if it doesnt exists
 			_, exists := flatValues[v.Display_title]
 
 			if !exists {
 				//-------------------------------------geoid: {timekey: FV}-----------------------------------//
 				flatValues[v.Display_title] = make(map[string]map[string]FlatValue)
+                flatValKeys = append(flatValKeys, v.Display_title)
 
 			}
             // Now we add the geography key
@@ -477,10 +481,14 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 	csvWriter.Write(header)
 	csvWriter.Flush()
 
+    // we need to sort flat values by keys
+    sort.Strings(flatValKeys)
+
 	// at this point our values are prepped for export
-	for indKey, val := range flatValues {
+	for _, indKey:= range flatValKeys {
+
 		// now iterate Geos
-		for geoId, indGeo := range val {
+		for geoId, indGeo := range flatValues[indKey] {
 		    csvRow := []string{indKey}
 			// now iterate time vals
 			csvRow = append(csvRow, []string{geoIdsToNames[geoId], geoId}...)
