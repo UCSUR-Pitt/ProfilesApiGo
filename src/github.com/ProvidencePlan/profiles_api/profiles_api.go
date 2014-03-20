@@ -59,6 +59,73 @@ type CONFIG struct {
 	CACHE_EXPIRE int
 }
 
+// TODO: this stuct needs to be implemented everywhere we fetch FlatValue data.
+type FlatValue struct {
+	Display_title    string
+	Geography_name   string
+	Geography_geokey string
+	Time_key         string
+    Value_type       string
+	Number           sql.NullFloat64
+	Percent          sql.NullFloat64
+	Moe              sql.NullFloat64
+	F_number         sql.NullString
+	F_percent        sql.NullString
+	F_moe            sql.NullString
+}
+
+// Returns a Map for each field as a string
+func (f *FlatValue) ToMap() map[string]string {
+	m := map[string]string{}
+
+	if !f.Number.Valid {
+		m["number"] = ""
+	} else {
+        if f.Value_type == "i"{
+		    m["number"] = f.F_number.String
+        }else{
+
+		    m["number"] = "n/a"
+        }
+	}
+	if !f.Percent.Valid {
+		m["percent"] = ""
+	} else {
+        if f.F_percent.String == "0.0%"{
+		    m["percent"] = ""
+        }else{
+		    m["percent"] = f.F_percent.String
+        }
+	}
+
+	if !f.Moe.Valid {
+		m["moe"] = ""
+        m["pct_moe"] = ""
+	} else {
+        if f.Value_type != "i"{
+            // this is a denominator and we moe should be a percentage.
+            m["moe"] = "n/a"
+            m["pct_moe"] = fmt.Sprintf("%v%%", f.Moe.Float64*100)
+            // we need to n/a estimates
+            m["number"] = "n/a"
+        }else{
+            // regular indicator moe
+		    m["moe"] = fmt.Sprintf("%v", f.Moe.Float64)
+            m["pct_moe"] = "n/a"
+        }
+	}
+
+	return m
+}
+
+func toSlice(f FlatValue) []string { // TODO: why cant I make this part of the struct. Error is: Cannot call pointer method on val.
+	s := []string{}
+	fM := f.ToMap()
+	// append fields in order, we cant simply loop over the keys.
+	s = append(s, []string{fM["number"], fM["moe"], fM["percent"], fM["pct_moe"]}...)
+	return s
+}
+
 func getFromCache(connStr string, hash string) []byte {
 	rConn, err := cache.RedisConn(connStr)
 	if err == nil {
@@ -291,72 +358,7 @@ func getData(ind string, time string, raw_geos string, conf CONFIG) []byte {
 	return j
 }
 
-// TODO: this stuct needs to be implemented everywhere we fetch FlatValue data.
-type FlatValue struct {
-	Display_title    string
-	Geography_name   string
-	Geography_geokey string
-	Time_key         string
-    Value_type       string
-	Number           sql.NullFloat64
-	Percent          sql.NullFloat64
-	Moe              sql.NullFloat64
-	F_number         sql.NullString
-	F_percent        sql.NullString
-	F_moe            sql.NullString
-}
 
-// Returns a Map for each field as a string
-func (f *FlatValue) ToMap() map[string]string {
-	m := map[string]string{}
-
-	if !f.Number.Valid {
-		m["number"] = ""
-	} else {
-        if f.Value_type == "i"{
-		    m["number"] = f.F_number.String
-        }else{
-
-		    m["number"] = "n/a"
-        }
-	}
-	if !f.Percent.Valid {
-		m["percent"] = ""
-	} else {
-        if f.F_percent.String == "0.0%"{
-		    m["percent"] = ""
-        }else{
-		    m["percent"] = f.F_percent.String
-        }
-	}
-
-	if !f.Moe.Valid {
-		m["moe"] = ""
-        m["pct_moe"] = ""
-	} else {
-        if f.Value_type != "i"{
-            // this is a denominator and we moe should be a percentage.
-            m["moe"] = "n/a"
-            m["pct_moe"] = fmt.Sprintf("%v%%", f.Moe.Float64*100)
-            // we need to n/a estimates
-            m["number"] = "n/a"
-        }else{
-            // regular indicator moe
-		    m["moe"] = fmt.Sprintf("%v", f.Moe.Float64)
-            m["pct_moe"] = "n/a"
-        }
-	}
-
-	return m
-}
-
-func toSlice(f FlatValue) []string { // TODO: why cant I make this part of the struct. Error is: Cannot call pointer method on val.
-	s := []string{}
-	fM := f.ToMap()
-	// append fields in order, we cant simply loop over the keys.
-	s = append(s, []string{fM["number"], fM["moe"], fM["percent"], fM["pct_moe"]}...)
-	return s
-}
 
 // Write csv formated data to w
 // inds is string of indicator ids, raw_goes is a string of geo_ids
@@ -435,7 +437,7 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 		log.Fatal(err)
 	}
     // TODO: This is a HACK. Create a geo names map as we go
-    geoIdsToNames := map[string]string{}
+    geoNamesToIds := map[string]string{}
 
 	for rows.Next() {
 		v := FlatValue{}
@@ -443,7 +445,7 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 
 		if err == nil {
             // collect the the geokey and name 
-            geoIdsToNames[v.Geography_geokey] = v.Geography_name
+            geoNamesToIds[v.Geography_name] = v.Geography_geokey
 
 			// add a new key to our map for each indicator if it doesnt exists
 			_, exists := flatValues[v.Display_title]
@@ -455,19 +457,19 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 
 			}
             // Now we add the geography key
-            _, exists = flatValues[v.Display_title][v.Geography_geokey]
+            _, exists = flatValues[v.Display_title][v.Geography_name]
 
             if !exists {
                 // it doesnt exist so we are gonna create a key for the new geokey
-                flatValues[v.Display_title][v.Geography_geokey] = make(map[string]FlatValue)
+                flatValues[v.Display_title][v.Geography_name] = make(map[string]FlatValue)
                 // now add placeholders for all the times.
                 for _, t := range timeSet {
-                    flatValues[v.Display_title][v.Geography_geokey][t] = FlatValue{Display_title: v.Display_title, Time_key: t}
+                    flatValues[v.Display_title][v.Geography_name][t] = FlatValue{Display_title: v.Display_title, Time_key: t}
                 }
             }
 
 			// actually store the data
-			flatValues[v.Display_title][v.Geography_geokey][v.Time_key] = v
+			flatValues[v.Display_title][v.Geography_name][v.Time_key] = v
 		}
 	}
 
@@ -488,10 +490,13 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 	for _, indKey:= range flatValKeys {
 
 		// now iterate Geos
-		for geoId, indGeo := range flatValues[indKey] {
+        sortedGeoKeys := sortGeoKeys(flatValues[indKey])
+       
+		for _, sgk := range sortedGeoKeys {
+            indGeo := flatValues[indKey][sgk]
 		    csvRow := []string{indKey}
 			// now iterate time vals
-			csvRow = append(csvRow, []string{geoIdsToNames[geoId], geoId}...)
+			csvRow = append(csvRow, []string{sgk,  geoNamesToIds[sgk]}...)
 			for _, timeVal := range indGeo {
 				csvRow = append(csvRow, toSlice(timeVal)...)
 			}
@@ -1089,6 +1094,22 @@ func getDB(conf CONFIG) (*sql.DB, error) {
 	}
 	return db, err
 }
+
+// return a sorted slice of keys 
+func sortGeoKeys(m map[string]map[string]FlatValue) []string { 
+    su := map[string]string{}
+    s := []string{}
+    for key, _ := range(m) {
+        su[key]=key
+    }
+    for key,_ := range(su){
+        s = append(s, key)
+    }
+
+    sort.Strings(s)
+    return s
+}
+
 
 func main() {
 	// ex: http://profiles.provplan.org/maps_api/v1/geo/set/12817/?&name=Total%20Population&time=2010&format=json&limit=0
