@@ -372,7 +372,6 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 		return
 	}
 
-
 	// Now we need to decide whether or not we want to give the user a single indicator
 	// or a single geography with many indicators
 	splitInds := strings.Split(cleaned_inds, ",")
@@ -386,7 +385,7 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 
 	db, err := getDB(config)
 	if err != nil {
-		log.Println("Error trying to call getDB--GetCSV")
+		log.Println("Error trying to call getDB: GetDataCSV")
 		http.Error(res, "", 500)
 		return
 	}
@@ -394,8 +393,8 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 
 	var time string
 	var timeSet []string
-	var flatValues = make(map[string]map[string]map[string]FlatValue) // {indid:{geoid:{time1, time2}}}
-    var flatValKeys = []string{}
+	var flatValues = make(map[string]map[string]map[string]FlatValue) //{indid:{geoid:{time1, time2}}}
+	var flatValKeys = []string{}
 
 	// FETCH the Distinct Times in our Dataset
 	timesQ := "SELECT DISTINCT time_key FROM profiles_flatvalue WHERE indicator_id IN (%v) AND geography_id IN(%v) AND time_key != 'change'"
@@ -412,34 +411,34 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 		timeSet = append(timeSet, time)
 	}
 	sort.Strings(timeSet)
-	// Now Fetch the Data
-	query := "SELECT display_title, geography_name, geography_geo_key, time_key, value_type, number, percent, moe, f_number, f_percent, f_moe FROM profiles_flatvalue WHERE indicator_id IN (%v) AND geography_id IN(%v) AND time_key != 'change' ORDER BY display_title, geography_name ASC"
 
-	query = fmt.Sprintf(query, cleaned_inds, cleaned_geos)
+	// Now Fetch the Data
+	query := "WITH T1 AS (SELECT indicator_id, display_title, geography_name, geography_geo_key, time_key, value_type, number, percent, moe, f_number, f_percent, f_moe FROM profiles_flatvalue WHERE indicator_id IN (%v) AND geography_id IN(%v) AND time_key != 'change'), T2 AS (SELECT DISTINCT ON (indicators_id) * from profiles_groupindex WHERE indicators_id IN (%v)), T3 AS (SELECT T1.*, T2.* FROM T1 LEFT OUTER JOIN T2 ON T1.indicator_id=T2.indicators_id) SELECT display_title, geography_name, geography_geo_key, time_key, value_type, number, percent, moe, f_number, f_percent, f_moe FROM T3 ORDER BY \"order\""
+
+	query = fmt.Sprintf(query, cleaned_inds, cleaned_geos, cleaned_inds)
 
 	stmt, err := db.Prepare(query)
 	if err != nil {
-		log.Println("Error Preparing query: getCSV")
+		log.Println("Error Preparing query: getDataCSV")
 		http.Error(res, "", 500)
 		return
 
 	}
 	defer stmt.Close()
-
 	rows, err := stmt.Query()
 	if err != nil {
 		log.Fatal(err)
 	}
-    // TODO: This is a HACK. Create a geo names map as we go
-    geoNamesToIds := map[string]string{}
+	// TODO: This is a HACK. Create a geo names map as we go
+	geoNamesToIds := map[string]string{}
 
 	for rows.Next() {
 		v := FlatValue{}
 		err := rows.Scan(&v.Display_title, &v.Geography_name, &v.Geography_geokey, &v.Time_key, &v.Value_type, &v.Number, &v.Percent, &v.Moe, &v.F_number, &v.F_percent, &v.F_moe)
 
 		if err == nil {
-            // collect the the geokey and name 
-            geoNamesToIds[v.Geography_name] = v.Geography_geokey
+			// collect the the geokey and name 
+			geoNamesToIds[v.Geography_name] = v.Geography_geokey
 
 			// add a new key to our map for each indicator if it doesnt exists
 			_, exists := flatValues[v.Display_title]
@@ -447,20 +446,20 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 			if !exists {
 				//-------------------------------------geoid: {timekey: FV}-----------------------------------//
 				flatValues[v.Display_title] = make(map[string]map[string]FlatValue)
-                flatValKeys = append(flatValKeys, v.Display_title)
+				flatValKeys = append(flatValKeys, v.Display_title)
 
 			}
-            // Now we add the geography key
-            _, exists = flatValues[v.Display_title][v.Geography_name]
+			// Now we add the geography key
+			_, exists = flatValues[v.Display_title][v.Geography_name]
 
-            if !exists {
-                // it doesnt exist so we are gonna create a key for the new geokey
-                flatValues[v.Display_title][v.Geography_name] = make(map[string]FlatValue)
-                // now add placeholders for all the times.
-                for _, t := range timeSet {
-                    flatValues[v.Display_title][v.Geography_name][t] = FlatValue{Display_title: v.Display_title, Time_key: t}
-                }
-            }
+			if !exists {
+				// it doesnt exist so we are gonna create a key for the new geokey
+				flatValues[v.Display_title][v.Geography_name] = make(map[string]FlatValue)
+				// now add placeholders for all the times.
+				for _, t := range timeSet {
+					flatValues[v.Display_title][v.Geography_name][t] = FlatValue{Display_title: v.Display_title, Time_key: t}
+                		}
+			}
 
 			// actually store the data
 			flatValues[v.Display_title][v.Geography_name][v.Time_key] = v
@@ -477,25 +476,23 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 	csvWriter.Write(header)
 	csvWriter.Flush()
 
-    // we need to sort flat values by keys
-    sort.Strings(flatValKeys)
-
 	// at this point our values are prepped for export
 	for _, indKey:= range flatValKeys {
 
 		// now iterate Geos
-        sortedGeoKeys := sortGeoKeys(flatValues[indKey])
+		sortedGeoKeys := sortGeoKeys(flatValues[indKey])
        
 		for _, sgk := range sortedGeoKeys {
-            indGeo := flatValues[indKey][sgk]
-		    csvRow := []string{indKey}
-			// now iterate time vals
+			csvRow := []string{indKey}
 			csvRow = append(csvRow, []string{sgk,  geoNamesToIds[sgk]}...)
-			for _, timeVal := range indGeo {
-				csvRow = append(csvRow, toSlice(timeVal)...)
+
+			// now iterate time vals
+			indGeo := flatValues[indKey][sgk]
+			for _, time := range timeSet {
+				csvRow = append(csvRow, toSlice(indGeo[time])...)
 			}
-            csvWriter.Write(csvRow)
-            csvWriter.Flush()
+			csvWriter.Write(csvRow)
+			csvWriter.Flush()
 		}
 	}
 
@@ -1190,17 +1187,17 @@ func main() {
 	m := martini.Classic()
 
 	m.Get("/csv/", func(res http.ResponseWriter, req *http.Request){
-        //TODO: Why does this respose comeback as "Canceled"
+        	//TODO: Why does this respose comeback as "Canceled"
 		inds := req.FormValue("i")
 		geos := req.FormValue("g")
-        domain_name := req.FormValue("dom")
-        if(domain_name == ""){
-            domain_name ="profiles"
-        }
+        	domain_name := req.FormValue("dom")
+        	if(domain_name == ""){
+            		domain_name ="profiles"
+        	}
 
 		res.Header().Set("Content-Disposition", fmt.Sprintf("attachment;filename=%s.csv", domain_name))
 		res.Header().Set("Access-Control-Allow-Origin", "*")
-        res.Header().Set("Status","200")
+        	res.Header().Set("Status","200")
 		getDataCSV(res, inds, geos, conf) // the response codes and data are written in the handler func
 	})
 
