@@ -557,7 +557,7 @@ func getDataGeoJson(ind string, time string, raw_geos string, conf CONFIG) []byt
 		query = base_query + " AND profiles_flatvalue.geography_id IN (" + cleaned_geos + ")"
 	}
 
-	stmt, err := db.Prepare(query)
+        stmt, err := db.Prepare(query)
 	if err != nil {
 		log.Println("Error runnning query: getDataGeoJson")
 		r := []byte("500")
@@ -864,12 +864,10 @@ func getGeoQuery(conf CONFIG, geoms_ids string, geo_lev_id string, query_type st
 
 	if cleaned_query_type == "IN" {
 		// find geoms contained in this geom
-		geom_query = "WITH targ_levs AS (SELECT maps_polygonmapfeature.id as geom_id, maps_polygonmapfeature.geo_key, maps_polygonmapfeature.geom, profiles_georecord.id as id, profiles_georecord.slug, profiles_georecord.name as label FROM maps_polygonmapfeature, profiles_georecord" + where_clause + "maps_polygonmapfeature.geo_key=profiles_georecord.geo_id), targ_geom AS (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geoms + ") LIMIT 1) SELECT DISTINCT ON (targ_levs.geo_key) targ_levs.id, targ_levs.geom_id, targ_levs.geo_key, targ_levs.label, targ_levs.slug FROM targ_levs, targ_geom WHERE ST_Contains(ST_Envelope(targ_geom.geom), ST_Centroid(targ_levs.geom)) ORDER BY targ_levs.geo_key"
-
+                geom_query = "WITH targ_levs AS (SELECT maps_polygonmapfeature.id as geom_id, maps_polygonmapfeature.geo_key, maps_polygonmapfeature.geom, profiles_georecord.id as id, profiles_georecord.slug, profiles_georecord.name as label FROM maps_polygonmapfeature, profiles_georecord" + where_clause + "maps_polygonmapfeature.geo_key=profiles_georecord.geo_id), targ_geom AS (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geoms + ") LIMIT 1) SELECT DISTINCT ON (targ_levs.geo_key) targ_levs.id, targ_levs.geom_id, targ_levs.geo_key, targ_levs.label, targ_levs.slug FROM targ_levs, targ_geom WHERE ST_Area(ST_Intersection(ST_MakeValid(targ_levs.geom), ST_MakeValid(targ_geom.geom))) > ST_Area(ST_MakeValid(targ_levs.geom))/2 ORDER BY targ_levs.geo_key"
 	} else if cleaned_query_type == "OF" {
 		// find geoms that contain geom
-		geom_query = "WITH levs AS (SELECT maps_polygonmapfeature.id as geom_id, maps_polygonmapfeature.geo_key, maps_polygonmapfeature.geom, profiles_georecord.id as id, profiles_georecord.slug, profiles_georecord.name as label FROM maps_polygonmapfeature, profiles_georecord" + where_clause + "maps_polygonmapfeature.geo_key=profiles_georecord.geo_id), targ AS (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geoms + ") LIMIT 1) SELECT DISTINCT ON (levs.geo_key) levs.id, levs.geom_id, levs.geo_key, levs.label, levs.slug FROM levs, targ WHERE ST_Contains(levs.geom, ST_Centroid(targ.geom)) ORDER BY levs.geo_key"
-
+		geom_query = "WITH targ_levs AS (SELECT maps_polygonmapfeature.id as geom_id, maps_polygonmapfeature.geo_key, maps_polygonmapfeature.geom, profiles_georecord.id as id, profiles_georecord.slug, profiles_georecord.name as label FROM maps_polygonmapfeature, profiles_georecord" + where_clause + "maps_polygonmapfeature.geo_key=profiles_georecord.geo_id), targ_geom AS (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geoms + ") LIMIT 1) SELECT DISTINCT ON (targ_levs.geo_key) targ_levs.id, targ_levs.geom_id, targ_levs.geo_key, targ_levs.label, targ_levs.slug FROM targ_levs, targ_geom WHERE ST_Area(ST_Intersection(ST_MakeValid(targ_levs.geom), ST_MakeValid(targ_geom.geom))) > ST_Area(ST_MakeValid(targ_geom.geom))/2 ORDER BY targ_levs.geo_key"
 	}
 	//TODO: We tend to always run querires like this, why not abstract it
 	db, err := getDB(conf)
@@ -879,8 +877,8 @@ func getGeoQuery(conf CONFIG, geoms_ids string, geo_lev_id string, query_type st
 		return r
 	}
 	defer db.Close()
-	stmt, err := db.Prepare(geom_query)
 
+        stmt, err := db.Prepare(geom_query)
 	if err != nil {
 		log.Println("Error preparing query: ", geom_query)
 		r := []byte("405")
@@ -889,9 +887,9 @@ func getGeoQuery(conf CONFIG, geoms_ids string, geo_lev_id string, query_type st
 	defer stmt.Close()
 
 	rows, err := stmt.Query()
-
 	if err != nil {
 		log.Println("Error running query ", geom_query)
+		log.Println(err)
 		r := []byte("405")
 		return r
 	}
