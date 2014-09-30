@@ -105,7 +105,7 @@ func (f *FlatValue) ToMap() map[string]string {
         if f.Value_type != "i"{
             // this is a denominator and we moe should be a percentage.
             m["moe"] = "n/a"
-            m["pct_moe"] = fmt.Sprintf("%v%%", f.Moe.Float64*100)
+            m["pct_moe"] = fmt.Sprintf("%v%%", f.Moe.Float64)
             // we need to n/a estimates
             m["number"] = "n/a"
         }else{
@@ -227,12 +227,6 @@ func getData(ind string, time string, raw_geos string, conf CONFIG) []byte {
 		return r
 	}
 
-	cleaned_time, err := sanitize(time, "[0-9,\\*\\-\\s]+")
-	if err != nil {
-		r := []byte("405")
-		return r
-	}
-
 	data := map[string]interface{}{} // this will be the object that wraps everything
 
 	db, err := getDB(conf)
@@ -259,7 +253,7 @@ func getData(ind string, time string, raw_geos string, conf CONFIG) []byte {
 	}
 	defer stmt.Close()
 
-	rows, err := stmt.Query(ind, cleaned_time)
+	rows, err := stmt.Query(ind, time)
 	if err != nil {
 		log.Println("Error running query %s in getData", query)
 	}
@@ -378,7 +372,6 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 		return
 	}
 
-
 	// Now we need to decide whether or not we want to give the user a single indicator
 	// or a single geography with many indicators
 	splitInds := strings.Split(cleaned_inds, ",")
@@ -392,7 +385,7 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 
 	db, err := getDB(config)
 	if err != nil {
-		log.Println("Error trying to call getDB--GetCSV")
+		log.Println("Error trying to call getDB: GetDataCSV")
 		http.Error(res, "", 500)
 		return
 	}
@@ -400,8 +393,8 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 
 	var time string
 	var timeSet []string
-	var flatValues = make(map[string]map[string]map[string]FlatValue) // {indid:{geoid:{time1, time2}}}
-    var flatValKeys = []string{}
+	var flatValues = make(map[string]map[string]map[string]FlatValue) //{indid:{geoid:{time1, time2}}}
+	var flatValKeys = []string{}
 
 	// FETCH the Distinct Times in our Dataset
 	timesQ := "SELECT DISTINCT time_key FROM profiles_flatvalue WHERE indicator_id IN (%v) AND geography_id IN(%v) AND time_key != 'change'"
@@ -418,34 +411,34 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 		timeSet = append(timeSet, time)
 	}
 	sort.Strings(timeSet)
-	// Now Fetch the Data
-	query := "SELECT display_title, geography_name, geography_geo_key, time_key, value_type, number, percent, moe, f_number, f_percent, f_moe FROM profiles_flatvalue WHERE indicator_id IN (%v) AND geography_id IN(%v) AND time_key != 'change' ORDER BY display_title, geography_name ASC"
 
-	query = fmt.Sprintf(query, cleaned_inds, cleaned_geos)
+	// Now Fetch the Data
+	query := "WITH T1 AS (SELECT indicator_id, display_title, geography_name, geography_geo_key, time_key, value_type, number, percent, moe, f_number, f_percent, f_moe FROM profiles_flatvalue WHERE indicator_id IN (%v) AND geography_id IN(%v) AND time_key != 'change'), T2 AS (SELECT DISTINCT ON (indicators_id) * from profiles_groupindex WHERE indicators_id IN (%v)), T3 AS (SELECT T1.*, T2.* FROM T1 LEFT OUTER JOIN T2 ON T1.indicator_id=T2.indicators_id) SELECT display_title, geography_name, geography_geo_key, time_key, value_type, number, percent, moe, f_number, f_percent, f_moe FROM T3 ORDER BY \"order\""
+
+	query = fmt.Sprintf(query, cleaned_inds, cleaned_geos, cleaned_inds)
 
 	stmt, err := db.Prepare(query)
 	if err != nil {
-		log.Println("Error Preparing query: getCSV")
+		log.Println("Error Preparing query: getDataCSV")
 		http.Error(res, "", 500)
 		return
 
 	}
 	defer stmt.Close()
-
 	rows, err := stmt.Query()
 	if err != nil {
 		log.Fatal(err)
 	}
-    // TODO: This is a HACK. Create a geo names map as we go
-    geoNamesToIds := map[string]string{}
+	// TODO: This is a HACK. Create a geo names map as we go
+	geoNamesToIds := map[string]string{}
 
 	for rows.Next() {
 		v := FlatValue{}
 		err := rows.Scan(&v.Display_title, &v.Geography_name, &v.Geography_geokey, &v.Time_key, &v.Value_type, &v.Number, &v.Percent, &v.Moe, &v.F_number, &v.F_percent, &v.F_moe)
 
 		if err == nil {
-            // collect the the geokey and name 
-            geoNamesToIds[v.Geography_name] = v.Geography_geokey
+			// collect the the geokey and name 
+			geoNamesToIds[v.Geography_name] = v.Geography_geokey
 
 			// add a new key to our map for each indicator if it doesnt exists
 			_, exists := flatValues[v.Display_title]
@@ -453,20 +446,20 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 			if !exists {
 				//-------------------------------------geoid: {timekey: FV}-----------------------------------//
 				flatValues[v.Display_title] = make(map[string]map[string]FlatValue)
-                flatValKeys = append(flatValKeys, v.Display_title)
+				flatValKeys = append(flatValKeys, v.Display_title)
 
 			}
-            // Now we add the geography key
-            _, exists = flatValues[v.Display_title][v.Geography_name]
+			// Now we add the geography key
+			_, exists = flatValues[v.Display_title][v.Geography_name]
 
-            if !exists {
-                // it doesnt exist so we are gonna create a key for the new geokey
-                flatValues[v.Display_title][v.Geography_name] = make(map[string]FlatValue)
-                // now add placeholders for all the times.
-                for _, t := range timeSet {
-                    flatValues[v.Display_title][v.Geography_name][t] = FlatValue{Display_title: v.Display_title, Time_key: t}
-                }
-            }
+			if !exists {
+				// it doesnt exist so we are gonna create a key for the new geokey
+				flatValues[v.Display_title][v.Geography_name] = make(map[string]FlatValue)
+				// now add placeholders for all the times.
+				for _, t := range timeSet {
+					flatValues[v.Display_title][v.Geography_name][t] = FlatValue{Display_title: v.Display_title, Time_key: t}
+                		}
+			}
 
 			// actually store the data
 			flatValues[v.Display_title][v.Geography_name][v.Time_key] = v
@@ -483,25 +476,23 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 	csvWriter.Write(header)
 	csvWriter.Flush()
 
-    // we need to sort flat values by keys
-    sort.Strings(flatValKeys)
-
 	// at this point our values are prepped for export
 	for _, indKey:= range flatValKeys {
 
 		// now iterate Geos
-        sortedGeoKeys := sortGeoKeys(flatValues[indKey])
+		sortedGeoKeys := sortGeoKeys(flatValues[indKey])
        
 		for _, sgk := range sortedGeoKeys {
-            indGeo := flatValues[indKey][sgk]
-		    csvRow := []string{indKey}
-			// now iterate time vals
+			csvRow := []string{indKey}
 			csvRow = append(csvRow, []string{sgk,  geoNamesToIds[sgk]}...)
-			for _, timeVal := range indGeo {
-				csvRow = append(csvRow, toSlice(timeVal)...)
+
+			// now iterate time vals
+			indGeo := flatValues[indKey][sgk]
+			for _, time := range timeSet {
+				csvRow = append(csvRow, toSlice(indGeo[time])...)
 			}
-            csvWriter.Write(csvRow)
-            csvWriter.Flush()
+			csvWriter.Write(csvRow)
+			csvWriter.Flush()
 		}
 	}
 
@@ -545,13 +536,6 @@ func getDataGeoJson(ind string, time string, raw_geos string, conf CONFIG) []byt
 		return r
 	}
 
-	cleaned_time, err := sanitize(time, "[0-9,\\*\\-\\s]+")
-	if err != nil {
-		r := []byte("405")
-		return r
-
-	}
-
 	data := map[string]interface{}{} // this will be the object that wraps everything
 
 	db, err := getDB(conf)
@@ -573,7 +557,7 @@ func getDataGeoJson(ind string, time string, raw_geos string, conf CONFIG) []byt
 		query = base_query + " AND profiles_flatvalue.geography_id IN (" + cleaned_geos + ")"
 	}
 
-	stmt, err := db.Prepare(query)
+        stmt, err := db.Prepare(query)
 	if err != nil {
 		log.Println("Error runnning query: getDataGeoJson")
 		r := []byte("500")
@@ -582,7 +566,7 @@ func getDataGeoJson(ind string, time string, raw_geos string, conf CONFIG) []byt
 	}
 	defer stmt.Close()
 
-	rows, err := stmt.Query(ind, cleaned_time)
+	rows, err := stmt.Query(ind, time)
 	if err != nil {
 		log.Println("Error runnning query: getDataGeoJson")
 		r := []byte("500")
@@ -880,12 +864,10 @@ func getGeoQuery(conf CONFIG, geoms_ids string, geo_lev_id string, query_type st
 
 	if cleaned_query_type == "IN" {
 		// find geoms contained in this geom
-		geom_query = "WITH targ_levs AS (SELECT maps_polygonmapfeature.id as geom_id, maps_polygonmapfeature.geo_key, maps_polygonmapfeature.geom, profiles_georecord.id as id, profiles_georecord.slug, profiles_georecord.name as label FROM maps_polygonmapfeature, profiles_georecord" + where_clause + "maps_polygonmapfeature.geo_key=profiles_georecord.geo_id), targ_geom AS (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geoms + ") LIMIT 1) SELECT DISTINCT ON (targ_levs.geo_key) targ_levs.id, targ_levs.geom_id, targ_levs.geo_key, targ_levs.label, targ_levs.slug FROM targ_levs, targ_geom WHERE ST_Contains(targ_geom.geom, ST_Centroid(targ_levs.geom)) ORDER BY targ_levs.geo_key"
-
+                geom_query = "WITH targ_levs AS (SELECT maps_polygonmapfeature.id as geom_id, maps_polygonmapfeature.geo_key, ST_SimplifyPreserveTopology(maps_polygonmapfeature.geom, 0.001) AS geom, profiles_georecord.id as id, profiles_georecord.slug, profiles_georecord.name as label FROM maps_polygonmapfeature, profiles_georecord" + where_clause + "maps_polygonmapfeature.geo_key=profiles_georecord.geo_id), targ_geom AS (SELECT id, geo_key, ST_SimplifyPreserveTopology(geom, 0.001) AS geom FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geoms + ") LIMIT 1) SELECT DISTINCT ON (targ_levs.geo_key) targ_levs.id, targ_levs.geom_id, targ_levs.geo_key, targ_levs.label, targ_levs.slug FROM targ_levs, targ_geom WHERE ST_Area(ST_Intersection(targ_levs.geom, targ_geom.geom)) > ST_Area(targ_levs.geom)/2 ORDER BY targ_levs.geo_key"
 	} else if cleaned_query_type == "OF" {
 		// find geoms that contain geom
-		geom_query = "WITH levs AS (SELECT maps_polygonmapfeature.id as geom_id, maps_polygonmapfeature.geo_key, maps_polygonmapfeature.geom, profiles_georecord.id as id, profiles_georecord.slug, profiles_georecord.name as label FROM maps_polygonmapfeature, profiles_georecord" + where_clause + "maps_polygonmapfeature.geo_key=profiles_georecord.geo_id), targ AS (SELECT id, geo_key, geom FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geoms + ") LIMIT 1) SELECT DISTINCT ON (levs.geo_key) levs.id, levs.geom_id, levs.geo_key, levs.label, levs.slug FROM levs, targ WHERE ST_Contains(levs.geom, ST_Centroid(targ.geom)) ORDER BY levs.geo_key"
-
+                geom_query = "WITH targ_levs AS (SELECT maps_polygonmapfeature.id as geom_id, maps_polygonmapfeature.geo_key, ST_SimplifyPreserveTopology(maps_polygonmapfeature.geom, 0.001) AS geom, profiles_georecord.id as id, profiles_georecord.slug, profiles_georecord.name as label FROM maps_polygonmapfeature, profiles_georecord" + where_clause + "maps_polygonmapfeature.geo_key=profiles_georecord.geo_id), targ_geom AS (SELECT id, geo_key, ST_SimplifyPreserveTopology(geom, 0.001) AS geom FROM maps_polygonmapfeature WHERE id IN (" + cleaned_geoms + ") LIMIT 1) SELECT DISTINCT ON (targ_levs.geo_key) targ_levs.id, targ_levs.geom_id, targ_levs.geo_key, targ_levs.label, targ_levs.slug FROM targ_levs, targ_geom WHERE ST_Area(ST_Intersection(targ_levs.geom, targ_geom.geom)) > ST_Area(targ_geom.geom)/2 ORDER BY targ_levs.geo_key"
 	}
 	//TODO: We tend to always run querires like this, why not abstract it
 	db, err := getDB(conf)
@@ -895,8 +877,8 @@ func getGeoQuery(conf CONFIG, geoms_ids string, geo_lev_id string, query_type st
 		return r
 	}
 	defer db.Close()
-	stmt, err := db.Prepare(geom_query)
 
+        stmt, err := db.Prepare(geom_query)
 	if err != nil {
 		log.Println("Error preparing query: ", geom_query)
 		r := []byte("405")
@@ -905,9 +887,9 @@ func getGeoQuery(conf CONFIG, geoms_ids string, geo_lev_id string, query_type st
 	defer stmt.Close()
 
 	rows, err := stmt.Query()
-
 	if err != nil {
 		log.Println("Error running query ", geom_query)
+		log.Println(err)
 		r := []byte("405")
 		return r
 	}
@@ -1013,6 +995,81 @@ func getGeosByLevSlug(conf CONFIG, levslug string, filter_key string) []byte {
 	}
 
 	return j
+}
+
+func getPointOverlays(conf CONFIG) []byte {
+	/*
+	   get all enabled PointOverlay (point shapefile overlays)
+	*/
+
+	hash := cache.MakeHash("maplayers")
+	c := getFromCache(conf.REDIS_CONN, hash)
+	if len(c) != 0 {
+		log.Println("Serving getPointOverlays from cache")
+		return c
+	}
+
+	db, err := getDB(conf)
+	if err != nil {
+		log.Println("Error trying to call getDB")
+		r := []byte("500")
+		return r
+	}
+	defer db.Close()
+
+	var (
+		name   string
+                shapefile_id string
+                image string
+		label   string
+		geom      string
+	)
+
+	query := "SELECT maps_pointoverlay.name, maps_pointoverlay.shapefile_id, maps_pointoverlayicon.image FROM maps_pointoverlay, maps_pointoverlayicon WHERE maps_pointoverlayicon.id = maps_pointoverlay.icon_id AND maps_pointoverlay.available_on_maps = TRUE"
+
+	rows, err := db.Query(query)
+	if err != nil {
+		log.Println("Error runnning query: getPointOverlays")
+		r := []byte("500")
+		return r
+	}
+	defer rows.Close()
+
+	data := map[string]interface{}{}
+	for rows.Next() {
+		err := rows.Scan(&name, &shapefile_id, &image)
+		if err == nil {
+
+			rows, err := db.Query("SELECT label, ST_ASGeoJSON(geom) AS geom FROM maps_pointmapfeature WHERE source_id = " + shapefile_id)
+			if err != nil {
+				log.Println("Error runnning query: getPointOverlays")
+				r := []byte("500")
+				return r
+			}
+			defer rows.Close()
+
+			results := []interface{}{}
+			for rows.Next() {
+				err := rows.Scan(&label, &geom)
+				if err == nil {
+					properties := make(map[string]interface{})
+					properties["label"] = label
+					properties["image"] = "/media/" + image
+					geom := jsonLoads(geom)
+					geom["properties"] = &properties
+					results = append(results, geom)
+				}
+			}
+			data[name] = results
+		}
+	}
+
+	j, err := json.Marshal(data)
+
+	putInCache(conf.REDIS_CONN, hash, j, conf.CACHE_EXPIRE)
+
+	return j
+
 }
 
 /* --------------------UTILS -----------------*/
@@ -1128,17 +1185,17 @@ func main() {
 	m := martini.Classic()
 
 	m.Get("/csv/", func(res http.ResponseWriter, req *http.Request){
-        //TODO: Why does this respose comeback as "Canceled"
+        	//TODO: Why does this respose comeback as "Canceled"
 		inds := req.FormValue("i")
 		geos := req.FormValue("g")
-        domain_name := req.FormValue("dom")
-        if(domain_name == ""){
-            domain_name ="profiles"
-        }
+        	domain_name := req.FormValue("dom")
+        	if(domain_name == ""){
+            		domain_name ="profiles"
+        	}
 
 		res.Header().Set("Content-Disposition", fmt.Sprintf("attachment;filename=%s.csv", domain_name))
 		res.Header().Set("Access-Control-Allow-Origin", "*")
-        res.Header().Set("Status","200")
+        	res.Header().Set("Status","200")
 		getDataCSV(res, inds, geos, conf) // the response codes and data are written in the handler func
 	})
 
@@ -1219,6 +1276,20 @@ func main() {
 		if rs == "405" {
 			return 405, "valid slug is required"
 		} else if rs == "500" {
+			return 500, "Server Error"
+		} else {
+			return 200, rs
+		}
+
+	})
+
+	m.Get("/point-overlays/", func(res http.ResponseWriter, req *http.Request) (int, string) {
+		res.Header().Set("Content-Type", "application/json")
+		res.Header().Set("Access-Control-Allow-Origin", "*")
+		var r []byte
+		r = getPointOverlays(conf)
+		rs := string(r[:])
+		if rs == "500" {
 			return 500, "Server Error"
 		} else {
 			return 200, rs
