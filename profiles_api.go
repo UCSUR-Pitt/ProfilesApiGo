@@ -36,8 +36,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/ProvidencePlan/profiles_api/cache"
-	"github.com/codegangsta/martini"
+	"./cache"
+	"github.com/go-martini/martini"
 	_ "github.com/lib/pq"
 	"io/ioutil"
 	"log"
@@ -62,6 +62,7 @@ type CONFIG struct {
 // TODO: this stuct needs to be implemented everywhere we fetch FlatValue data.
 type FlatValue struct {
 	Display_title    string
+	Geography_level  string
 	Geography_name   string
 	Geography_geokey string
 	Time_key         string
@@ -203,6 +204,7 @@ func getData(ind string, time string, raw_geos string, conf CONFIG) []byte {
 		indicator_slug string
 		display_title  string
 		geography_id   int
+		geography_geo_key  string
 		geography_name string
 		//geography_slug string
 		geometry_id     sql.NullInt64
@@ -237,7 +239,7 @@ func getData(ind string, time string, raw_geos string, conf CONFIG) []byte {
 	}
 	defer db.Close()
 
-	var base_query string = "SELECT indicator_slug, display_title, geography_id, geography_name, geometry_id, value_type, time_key, number, percent, moe, numerator,numerator_moe, f_number, f_percent, f_moe, f_numerator, f_numerator_moe FROM profiles_flatvalue WHERE indicator_slug = $1 AND time_key= $2"
+	var base_query string = "SELECT indicator_slug, display_title, geography_id, geography_geo_key, geography_name, geometry_id, value_type, time_key, number, percent, moe, numerator,numerator_moe, f_number, f_percent, f_moe, f_numerator, f_numerator_moe FROM profiles_flatvalue WHERE indicator_slug = $1 AND time_key= $2"
 	var query string
 
 	// we need to support getting * geos or specific ones via thier ids
@@ -265,13 +267,14 @@ func getData(ind string, time string, raw_geos string, conf CONFIG) []byte {
 
 	for rows.Next() {
 		jrow := make(map[string]interface{})
-		err := rows.Scan(&indicator_slug, &display_title, &geography_id, &geography_name, &geometry_id, &value_type, &time_key, &number, &percent, &moe, &numerator, &numerator_moe, &f_number, &f_percent, &f_moe, &f_numerator, &f_numerator_moe)
+		err := rows.Scan(&indicator_slug, &display_title, &geography_id, &geography_geo_key, &geography_name, &geometry_id, &value_type, &time_key, &number, &percent, &moe, &numerator, &numerator_moe, &f_number, &f_percent, &f_moe, &f_numerator, &f_numerator_moe)
 		if err != nil {
 			log.Fatal(err)
 		}
 		jrow["indicator_slug"] = indicator_slug
 		jrow["display_title"] = display_title
 		jrow["geography_id"] = geography_id
+		jrow["geography_geo_key"] = geography_geo_key
 		jrow["geography_name"] = geography_name
 		jrow["value_type"] = value_type
 		jrow["time_key"] = time_key
@@ -413,13 +416,14 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 	sort.Strings(timeSet)
 
 	// Now Fetch the Data
-	query := "WITH T1 AS (SELECT indicator_id, display_title, geography_name, geography_geo_key, time_key, value_type, number, percent, moe, f_number, f_percent, f_moe FROM profiles_flatvalue WHERE indicator_id IN (%v) AND geography_id IN(%v) AND time_key != 'change'), T2 AS (SELECT DISTINCT ON (indicators_id) * from profiles_groupindex WHERE indicators_id IN (%v)), T3 AS (SELECT T1.*, T2.* FROM T1 LEFT OUTER JOIN T2 ON T1.indicator_id=T2.indicators_id) SELECT display_title, geography_name, geography_geo_key, time_key, value_type, number, percent, moe, f_number, f_percent, f_moe FROM T3 ORDER BY \"order\""
+	query := "WITH T1 AS (SELECT indicator_id, display_title, geography_id, geography_name, geography_geo_key, time_key, value_type, number, percent, moe, f_number, f_percent, f_moe FROM profiles_flatvalue WHERE indicator_id IN (%v) AND geography_id IN(%v) AND time_key != 'change'), T2 AS (SELECT DISTINCT ON (indicators_id) * FROM profiles_groupindex WHERE indicators_id IN (%v)), T3 AS (SELECT T1.*, T2.* FROM T1 LEFT OUTER JOIN T2 ON T1.indicator_id=T2.indicators_id), T4 AS ( SELECT profiles_georecord.id AS geography_id, profiles_geolevel.id AS level_id, profiles_geolevel.name AS geography_level FROM profiles_georecord LEFT OUTER JOIN profiles_geolevel ON profiles_geolevel.id = profiles_georecord.level_id ) SELECT display_title, geography_level, geography_name, geography_geo_key, time_key, value_type, number, percent, moe, f_number, f_percent, f_moe FROM T3 LEFT JOIN T4 ON T3.geography_id = T4.geography_id ORDER BY \"order\""
 
 	query = fmt.Sprintf(query, cleaned_inds, cleaned_geos, cleaned_inds)
 
 	stmt, err := db.Prepare(query)
 	if err != nil {
 		log.Println("Error Preparing query: getDataCSV")
+		log.Println(err)
 		http.Error(res, "", 500)
 		return
 
@@ -429,25 +433,25 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 	if err != nil {
 		log.Fatal(err)
 	}
-	// TODO: This is a HACK. Create a geo names map as we go
-	geoNamesToIds := map[string]string{}
+	geoDetails := map[string]map[string]string{}
 
 	for rows.Next() {
 		v := FlatValue{}
-		err := rows.Scan(&v.Display_title, &v.Geography_name, &v.Geography_geokey, &v.Time_key, &v.Value_type, &v.Number, &v.Percent, &v.Moe, &v.F_number, &v.F_percent, &v.F_moe)
+		err := rows.Scan(&v.Display_title, &v.Geography_level, &v.Geography_name, &v.Geography_geokey, &v.Time_key, &v.Value_type, &v.Number, &v.Percent, &v.Moe, &v.F_number, &v.F_percent, &v.F_moe)
 
 		if err == nil {
-			// collect the the geokey and name 
-			geoNamesToIds[v.Geography_name] = v.Geography_geokey
+			// collect the the geokey and name (TODO: There's probably a better way to get these)
+			geoDetails[v.Geography_name] = make(map[string]string)
+			geoDetails[v.Geography_name]["key"] = v.Geography_geokey
+			geoDetails[v.Geography_name]["lvl"]	= v.Geography_level
 
 			// add a new key to our map for each indicator if it doesnt exists
 			_, exists := flatValues[v.Display_title]
-
+			
 			if !exists {
 				//-------------------------------------geoid: {timekey: FV}-----------------------------------//
 				flatValues[v.Display_title] = make(map[string]map[string]FlatValue)
 				flatValKeys = append(flatValKeys, v.Display_title)
-
 			}
 			// Now we add the geography key
 			_, exists = flatValues[v.Display_title][v.Geography_name]
@@ -458,7 +462,7 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 				// now add placeholders for all the times.
 				for _, t := range timeSet {
 					flatValues[v.Display_title][v.Geography_name][t] = FlatValue{Display_title: v.Display_title, Time_key: t}
-                		}
+				}
 			}
 
 			// actually store the data
@@ -467,7 +471,7 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 	}
 
 	csvWriter := csv.NewWriter(res)
-	header := []string{"indicator", "geography_name", "geography_id"}
+	header := []string{"indicator", "geography_level", "geography_name", "geography_id"}
 	// generate a header
 	for _, tVal := range timeSet {
 		header = append(header, []string{tVal + "_est", tVal + "_moe", tVal + "_pct", tVal + "_pct_moe"}...)
@@ -478,13 +482,14 @@ func getDataCSV(res http.ResponseWriter, inds string, raw_geos string, config CO
 
 	// at this point our values are prepped for export
 	for _, indKey:= range flatValKeys {
-
+				
 		// now iterate Geos
 		sortedGeoKeys := sortGeoKeys(flatValues[indKey])
        
 		for _, sgk := range sortedGeoKeys {
-			csvRow := []string{indKey}
-			csvRow = append(csvRow, []string{sgk,  geoNamesToIds[sgk]}...)
+
+			csvRow := []string{indKey}			
+			csvRow = append(csvRow, []string{geoDetails[sgk]["lvl"], sgk,  geoDetails[sgk]["key"]}...)
 
 			// now iterate time vals
 			indGeo := flatValues[indKey][sgk]
@@ -511,6 +516,7 @@ func getDataGeoJson(ind string, time string, raw_geos string, conf CONFIG) []byt
 		indicator_slug string
 		display_title  string
 		geography_id   int
+		geography_geo_key string
 		geography_name string
 		//geography_slug string
 		geometry_id     sql.NullInt64
@@ -545,7 +551,7 @@ func getDataGeoJson(ind string, time string, raw_geos string, conf CONFIG) []byt
 		return r
 	}
 	defer db.Close()
-	var base_query = "SELECT profiles_flatvalue.indicator_slug, profiles_flatvalue.display_title, profiles_flatvalue.geography_id, profiles_flatvalue.geography_name, profiles_flatvalue.geometry_id, profiles_flatvalue.value_type, profiles_flatvalue.time_key, profiles_flatvalue.number, profiles_flatvalue.percent, profiles_flatvalue.moe, profiles_flatvalue.numerator, profiles_flatvalue.numerator_moe, profiles_flatvalue.f_number, profiles_flatvalue.f_percent, profiles_flatvalue.f_moe, profiles_flatvalue.f_numerator, profiles_flatvalue.f_numerator_moe, ST_AsGeoJSON(maps_polygonmapfeature.geom) AS geom FROM profiles_flatvalue LEFT OUTER JOIN maps_polygonmapfeature ON (profiles_flatvalue.geography_geo_key = maps_polygonmapfeature.geo_key) WHERE profiles_flatvalue.indicator_slug = $1 AND profiles_flatvalue.time_key= $2"
+	var base_query = "SELECT profiles_flatvalue.indicator_slug, profiles_flatvalue.display_title, profiles_flatvalue.geography_id, profiles_flatvalue.geography_geo_key, profiles_flatvalue.geography_name, profiles_flatvalue.geometry_id, profiles_flatvalue.value_type, profiles_flatvalue.time_key, profiles_flatvalue.number, profiles_flatvalue.percent, profiles_flatvalue.moe, profiles_flatvalue.numerator, profiles_flatvalue.numerator_moe, profiles_flatvalue.f_number, profiles_flatvalue.f_percent, profiles_flatvalue.f_moe, profiles_flatvalue.f_numerator, profiles_flatvalue.f_numerator_moe, ST_AsGeoJSON(maps_polygonmapfeature.geom) AS geom FROM profiles_flatvalue LEFT OUTER JOIN maps_polygonmapfeature ON (profiles_flatvalue.geography_geo_key = maps_polygonmapfeature.geo_key) WHERE profiles_flatvalue.indicator_slug = $1 AND profiles_flatvalue.time_key= $2"
 
 	var query string
 
@@ -580,7 +586,7 @@ func getDataGeoJson(ind string, time string, raw_geos string, conf CONFIG) []byt
 
 	for rows.Next() {
 		jrow := make(map[string]interface{})
-		err := rows.Scan(&indicator_slug, &display_title, &geography_id, &geography_name, &geometry_id, &value_type, &time_key, &number, &percent, &moe, &numerator, &numerator_moe, &f_number, &f_percent, &f_moe, &f_numerator, &f_numerator_moe, &geom)
+		err := rows.Scan(&indicator_slug, &display_title, &geography_id, &geography_geo_key, &geography_name, &geometry_id, &value_type, &time_key, &number, &percent, &moe, &numerator, &numerator_moe, &f_number, &f_percent, &f_moe, &f_numerator, &f_numerator_moe, &geom)
 		if err == nil {
 			if geom.Valid {
 				jrow = jsonLoads(geom.String)
@@ -589,6 +595,7 @@ func getDataGeoJson(ind string, time string, raw_geos string, conf CONFIG) []byt
 			}
 			properties := make(map[string]interface{})
 			properties["label"] = geography_name
+			properties["geography_geo_key"] = geography_geo_key
 			properties["geography_id"] = geography_id
 			values := make(map[string]interface{})
 			values["indicator_slug"] = indicator_slug
@@ -1193,7 +1200,7 @@ func main() {
             		domain_name ="profiles"
         	}
 
-		res.Header().Set("Content-Disposition", fmt.Sprintf("attachment;filename=%s.csv", domain_name))
+		res.Header().Set("Content-Disposition", fmt.Sprintf("attachment;filename=%s.csv", strings.Replace(domain_name, ",", " ", -1)))
 		res.Header().Set("Access-Control-Allow-Origin", "*")
         	res.Header().Set("Status","200")
 		getDataCSV(res, inds, geos, conf) // the response codes and data are written in the handler func
